@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use pdf_writer::{types::ProcSet, Content, Filter, Finish, Name, Pdf, Rect, Ref, Str};
+use pdf_writer::{Content, Filter, Finish, Name, Pdf, Rect, Ref, Str};
 use ratex_font::FontId;
 use ratex_types::color::Color;
 use ratex_types::display_item::{DisplayItem, DisplayList};
@@ -15,11 +15,6 @@ use ratex_types::path_command::PathCommand;
 use crate::fonts::{self, EmbeddedFont};
 
 /// Options controlling PDF output.
-///
-/// If the crate is built **without** `embed-fonts`, you must set [`Self::font_dir`] to a directory
-/// of KaTeX `.ttf` files before calling [`render_to_pdf`]. [`Self::default`] leaves `font_dir`
-/// empty on purpose so callers do not assume a magic path. With `embed-fonts`, `font_dir` is
-/// ignored (glyphs come from `ratex-katex-fonts`).
 #[derive(Debug, Clone)]
 pub struct PdfOptions {
     /// User units per em. Default: 40.
@@ -28,20 +23,20 @@ pub struct PdfOptions {
     pub padding: f64,
     /// Stroke width for unfilled paths, in user units. Default: 1.5.
     pub stroke_width: f64,
-    /// Directory containing KaTeX `.ttf` files. Used only when **`embed-fonts` is disabled**;
-    /// otherwise ignored.
-    pub font_dir: String,
+    /// If true, draw a short thin baseline marker at the formula's baseline,
+    /// matching the style of LaTeX `\showbaseline`.
+    /// Default: false.
+    pub show_baseline: bool,
 }
 
 impl Default for PdfOptions {
-    /// Numeric fields match typical CLI defaults. `font_dir` is empty: set it unless using
-    /// `embed-fonts`.
+    /// Numeric fields match typical CLI defaults.
     fn default() -> Self {
         Self {
             font_size: 40.0,
             padding: 10.0,
             stroke_width: 1.5,
-            font_dir: String::new(),
+            show_baseline: false,
         }
     }
 }
@@ -64,6 +59,11 @@ impl std::fmt::Display for PdfError {
 
 impl std::error::Error for PdfError {}
 
+const PDF_PT_PER_CM: f64 = 72.0 / 2.54;
+const DEFAULT_TEX_TEXT_PT: f64 = 10.0;
+const BASELINE_MARKER_LEN_EM: f64 = (0.1 * PDF_PT_PER_CM) / DEFAULT_TEX_TEXT_PT;
+const BASELINE_MARKER_WIDTH_EM: f64 = 0.1 / DEFAULT_TEX_TEXT_PT;
+
 /// Render a [`DisplayList`] to a PDF byte buffer.
 pub fn render_to_pdf(
     display_list: &DisplayList,
@@ -78,11 +78,11 @@ pub fn render_to_pdf(
     let page_h = total_h * em + 2.0 * pad;
 
     // Load raw font data (lazy: only fonts referenced by this display list).
-    let font_data = ratex_font_loader::load_fonts_for_items(&options.font_dir, &display_list.items)
-        .map_err(PdfError::Font)?;
+    let font_data =
+        ratex_font_loader::load_fonts_for_items("", &display_list.items).map_err(PdfError::Font)?;
 
-    // Pass 1: collect glyph usage (emoji → raster XObjects; other faces → subset fonts).
-    let collected = fonts::collect_glyph_usage(&display_list.items, &font_data, em);
+    // Pass 1: collect glyph usage across the display list.
+    let font_usages = fonts::collect_glyph_usage(&display_list.items, &font_data);
 
     // Build the PDF.
     let mut pdf = Pdf::new();
@@ -93,11 +93,8 @@ pub fn render_to_pdf(
     let page_ref = alloc.bump();
     let content_ref = alloc.bump();
 
-    // Pass 2: embed fonts (no Type0 for color emoji — those use images below).
-    let embedded = fonts::embed_fonts(&mut pdf, &mut alloc, &collected.font_usages, &font_data)
-        .map_err(PdfError::Font)?;
-
-    let emoji_embedded = fonts::embed_emoji_rasters(&mut pdf, &mut alloc, &collected.emoji_rasters)
+    // Pass 2: embed the used fonts.
+    let embedded = fonts::embed_fonts(&mut pdf, &mut alloc, &font_usages, &font_data)
         .map_err(PdfError::Font)?;
 
     // Build lookup: FontId → EmbeddedFont index.
@@ -107,24 +104,17 @@ pub fn render_to_pdf(
         .map(|(i, ef)| (ef.font_id, i))
         .collect();
 
-    let emoji_ix: HashMap<u32, usize> = emoji_embedded
-        .iter()
-        .enumerate()
-        .map(|(i, e)| (e.char_code, i))
-        .collect();
-
     // Generate content stream.
     let content_bytes = build_content_stream(
-        &display_list.items,
+        display_list,
         &embedded,
         &font_index,
         &font_data,
-        &emoji_embedded,
-        &emoji_ix,
         em,
         pad,
         page_h,
         sw,
+        options.show_baseline,
     );
 
     // Compress content stream.
@@ -144,28 +134,11 @@ pub fn render_to_pdf(
 
     // Page Resources: font dictionary.
     let mut resources = page.resources();
-    if !emoji_embedded.is_empty() {
-        // Color images via `Do` — include ImageC for older print/PDF pipelines that omit it.
-        resources.proc_sets([
-            ProcSet::Pdf,
-            ProcSet::Text,
-            ProcSet::ImageGrayscale,
-            ProcSet::ImageColor,
-            ProcSet::ImageIndexed,
-        ]);
-    }
     let mut font_dict = resources.fonts();
     for ef in &embedded {
         font_dict.pair(Name(ef.res_name.as_bytes()), ef.type0_ref);
     }
     font_dict.finish();
-    if !emoji_embedded.is_empty() {
-        let mut xobjects = resources.x_objects();
-        for e in &emoji_embedded {
-            xobjects.pair(Name(e.res_name.as_bytes()), e.image_ref);
-        }
-        xobjects.finish();
-    }
     resources.finish();
     page.finish();
 
@@ -187,18 +160,38 @@ pub fn render_to_pdf(
 
 #[allow(clippy::too_many_arguments)]
 fn build_content_stream(
-    items: &[DisplayItem],
+    display_list: &DisplayList,
     embedded: &[EmbeddedFont],
     font_index: &HashMap<FontId, usize>,
     font_data: &fonts::RawFontData,
-    emoji_assets: &[fonts::EmbeddedEmojiImage],
-    emoji_ix: &HashMap<u32, usize>,
     em: f64,
     pad: f64,
     page_h: f64,
     stroke_width: f64,
+    show_baseline: bool,
 ) -> Vec<u8> {
+    let items = &display_list.items;
     let mut content = Content::new();
+
+    // Draw a short baseline marker aligned with the formula baseline.
+    // The marker scales with the formula font size so the visual proportion matches
+    // LaTeX's `\rule{0.1cm}{0.1pt}` at the default 10pt text size.
+    if show_baseline {
+        let baseline_y = display_list.height * em + pad;
+        let line_y = flip_y(baseline_y, page_h);
+        let marker_width = (em * BASELINE_MARKER_WIDTH_EM) as f32;
+        let marker_len = em * BASELINE_MARKER_LEN_EM;
+
+        content.set_line_width(marker_width);
+        content.set_stroke_rgb(0.0, 0.0, 0.0);
+
+        let start_x = pad as f32;
+        let end_x = (pad + marker_len) as f32;
+
+        content.move_to(start_x, line_y);
+        content.line_to(end_x, line_y);
+        content.stroke();
+    }
 
     for item in items {
         match item {
@@ -224,8 +217,6 @@ fn build_content_stream(
                     embedded,
                     font_index,
                     font_data,
-                    emoji_assets,
-                    emoji_ix,
                 );
             }
             DisplayItem::Line {
@@ -301,55 +292,6 @@ fn flip_y(y: f64, page_h: f64) -> f32 {
 // Glyph
 // ---------------------------------------------------------------------------
 
-/// Color emoji via sbix PNG and image XObject (placement matches `ratex-render::try_blit_raster_glyph`).
-fn emit_emoji_raster(
-    content: &mut Content,
-    px: f64,
-    py: f64,
-    glyph_em: f64,
-    page_h: f64,
-    asset: &fonts::EmbeddedEmojiImage,
-) {
-    let ppm = f64::from(asset.pixels_per_em.max(1));
-    let mut s = glyph_em / ppm;
-
-    // Scale emoji to fit 1.0em layout width if it's wider (prevents overflow).
-    let actual_width_em = f64::from(asset.width_px) / ppm;
-    let assumed_width = 1.0;
-    if actual_width_em > 0.01 && actual_width_em > assumed_width * 1.01 {
-        s *= assumed_width / actual_width_em;
-    }
-
-    let disp_w = f64::from(asset.width_px) * s;
-    let disp_h = f64::from(asset.height_px) * s;
-    let top_x = px + f64::from(asset.strike_x) * s;
-    let mut top_y = py - (f64::from(asset.strike_y) + f64::from(asset.height_px)) * s;
-    let center_strike = (f64::from(asset.strike_y) + f64::from(asset.height_px) / 2.0) / ppm;
-    let axis = ratex_font::get_global_metrics(0).axis_height;
-    top_y += (center_strike - axis) * glyph_em;
-    let mut pdf_y_bl = page_h - top_y - disp_h;
-    let pdf_y_top = pdf_y_bl + disp_h;
-    // Many viewers clip XObjects strictly to MediaBox. If sbix placement + axis nudge pushes the
-    // bitmap fully above y=page_h or fully below y=0, nothing paints ("invisible" emoji).
-    if pdf_y_top > page_h {
-        pdf_y_bl = page_h - disp_h;
-    }
-    if pdf_y_bl < 0.0 {
-        pdf_y_bl = 0.0;
-    }
-    content.save_state();
-    content.transform([
-        disp_w as f32,
-        0.0,
-        0.0,
-        disp_h as f32,
-        top_x as f32,
-        pdf_y_bl as f32,
-    ]);
-    content.x_object(Name(asset.res_name.as_bytes()));
-    content.restore_state();
-}
-
 #[allow(clippy::too_many_arguments)]
 fn emit_glyph(
     content: &mut Content,
@@ -364,17 +306,7 @@ fn emit_glyph(
     embedded: &[EmbeddedFont],
     font_index: &HashMap<FontId, usize>,
     font_data: &fonts::RawFontData,
-    emoji_assets: &[fonts::EmbeddedEmojiImage],
-    emoji_ix: &HashMap<u32, usize>,
 ) {
-    // Color emoji: collect/embed keyed only by char_code; draw whenever we embedded an XObject,
-    // without re-resolving (must match [`fonts::collect_glyph_usage`] prefer-color path).
-    if let Some(&ix) = emoji_ix.get(&char_code) {
-        let asset = &emoji_assets[ix];
-        emit_emoji_raster(content, px, py, scale * em, page_h, asset);
-        return;
-    }
-
     let (actual_fid, gid) = match fonts::resolve_pdf_glyph(font_data, font_name, char_code) {
         Some(p) => p,
         None => return,
@@ -395,36 +327,13 @@ fn emit_glyph(
     let pdf_x = px as f32;
     let pdf_y = flip_y(py, page_h);
 
-    // Emoji outline fallback has no KaTeX metrics; scale it to the 1.0em width that layout
-    // allocates for missing emoji so Windows vector fallback does not overflow.
-    let mut text_matrix_scale = 1.0;
-    if actual_fid == FontId::EmojiFallback {
-        if let Some(font_bytes) = font_data.get(&FontId::EmojiFallback) {
-            use ab_glyph::Font;
-            let idx = ratex_unicode_font::emoji_font_face_index().unwrap_or(0);
-            if let Ok(font) = ab_glyph::FontRef::try_from_slice_and_index(font_bytes, idx) {
-                let ch = char::from_u32(char_code).unwrap_or('\u{FFFD}');
-                let glyph_id = font.glyph_id(ch);
-                if glyph_id.0 != 0 {
-                    let actual_advance = font.h_advance_unscaled(glyph_id);
-                    let units_per_em = font.units_per_em().unwrap_or(1000.0);
-                    let actual_advance_em = actual_advance / units_per_em;
-                    let assumed_width = 1.0;
-                    if actual_advance_em > 0.01 && actual_advance_em > assumed_width * 1.01 {
-                        text_matrix_scale = assumed_width / actual_advance_em;
-                    }
-                }
-            }
-        }
-    }
-
     // CID as 2-byte big-endian.
     let cid_bytes = [(new_cid >> 8) as u8, (new_cid & 0xFF) as u8];
 
     set_fill_rgb(content, color);
     content.begin_text();
     content.set_font(Name(ef.res_name.as_bytes()), glyph_em);
-    content.set_text_matrix([text_matrix_scale, 0.0, 0.0, text_matrix_scale, pdf_x, pdf_y]);
+    content.set_text_matrix([1.0, 0.0, 0.0, 1.0, pdf_x, pdf_y]);
     content.show(Str(&cid_bytes));
     content.end_text();
 }
@@ -648,4 +557,54 @@ fn set_fill_rgb(content: &mut Content, color: &Color) {
 
 fn set_stroke_rgb(content: &mut Content, color: &Color) {
     content.set_stroke_rgb(color.r, color.g, color.b);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::{build_content_stream, BASELINE_MARKER_LEN_EM, BASELINE_MARKER_WIDTH_EM};
+    use ratex_font::FontId;
+    use ratex_types::display_item::DisplayList;
+
+    #[test]
+    fn show_baseline_draws_short_marker_at_formula_baseline() {
+        let display_list = DisplayList {
+            items: vec![],
+            width: 4.0,
+            height: 2.5,
+            depth: 1.0,
+        };
+        let font_data: crate::fonts::RawFontData = HashMap::<FontId, Vec<u8>>::new().into();
+
+        let content = build_content_stream(
+            &display_list,
+            &[],
+            &HashMap::new(),
+            &font_data,
+            20.0,
+            10.0,
+            (display_list.height + display_list.depth) * 20.0 + 20.0,
+            1.5,
+            true,
+        );
+
+        let content = String::from_utf8(content).expect("PDF content stream should be UTF-8");
+        let baseline_y = display_list.depth * 20.0 + 10.0;
+        let baseline_width = 20.0 * BASELINE_MARKER_WIDTH_EM;
+        let baseline_x2 = (10.0 + 20.0 * BASELINE_MARKER_LEN_EM) as f32;
+
+        assert!(
+            content.contains(&format!("{baseline_width:.1} w")),
+            "missing baseline width in content stream: {content}"
+        );
+        assert!(
+            content.contains(&format!("10 {:.0} m", baseline_y)),
+            "missing baseline start in content stream: {content}"
+        );
+        assert!(
+            content.contains(&format!("{baseline_x2:.7} {:.0} l", baseline_y)),
+            "missing baseline end in content stream: {content}"
+        );
+    }
 }

@@ -18,7 +18,7 @@ description: >-
 
 ## When to use
 
-- After changes to rendering paths (especially `renderer.rs`, `fonts.rs`, `standalone.rs`, outline caching, font loading).
+- After changes to rendering paths (especially `renderer.rs`, `fonts.rs`, `glyphs.rs`, outline caching, font loading).
 - Before committing optimizations — run cold first so cache impact is visible.
 - Comparing before/after for a specific renderer (PNG vs SVG vs PDF).
 
@@ -36,7 +36,7 @@ description: >-
 cargo test -p ratex-render --test bench_render --release -- --ignored --nocapture
 ```
 
-Renders 100 formulas across 6 categories (math, complex, matrix, cjk, emoji, chem) in PNG, SVG, SVG-standalone, and PDF. Prints per-category averages and overall throughput (formulas/sec).
+Renders 100 formulas across 6 categories (math, complex, matrix, cjk, emoji, chem) in PNG, SVG, and PDF. Prints per-category averages and overall throughput (formulas/sec).
 
 Warmup: 1 iteration per formula. Measurement: 3 iterations, averaged.
 

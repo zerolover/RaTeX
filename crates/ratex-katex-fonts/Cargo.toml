@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation.workspace = true
-description = "KaTeX TTF fonts embedded for RaTeX (optional embed-fonts support)"
+description = "KaTeX TTF fonts embedded for RaTeX bundled-font support"
 readme = "README.md"
 
 [dependencies]

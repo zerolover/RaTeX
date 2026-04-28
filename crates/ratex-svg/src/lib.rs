@@ -4,21 +4,14 @@
 //! with **y downward** and the baseline at `y = height` in layout space. They are scaled by
 //! [`SvgOptions::font_size`] plus [`SvgOptions::padding`], same convention as `ratex-render`.
 //!
-//! **Glyphs (default):** each [`DisplayItem::GlyphPath`](ratex_types::display_item::DisplayItem::GlyphPath)
-//! becomes a `<text>` element using KaTeX CSS `font-family` names (`KaTeX_Main`, `KaTeX_Math`, …).
-//! Load [KaTeX](https://katex.org/) stylesheets in the host page for correct shapes.
-//!
-//! **Self-contained SVG:** enable Cargo feature `standalone` and set [`SvgOptions::embed_glyphs`]
-//! with a KaTeX `font_dir` to emit glyph outlines as `<path>` (no webfonts), matching
-//! `ratex-render`'s `ab_glyph` geometry. Color emoji use the same sbix PNG strikes as PNG output,
-//! embedded as `<image href="data:image/png;base64,...">` when vector fallback would be invisible.
+//! Glyphs are emitted as self-contained SVG `<path>` outlines, matching `ratex-render`'s
+//! `ab_glyph` geometry.
 
 use ratex_types::color::Color;
 use ratex_types::display_item::{DisplayItem, DisplayList};
 use ratex_types::path_command::PathCommand;
 
-#[cfg(feature = "standalone")]
-mod standalone;
+mod glyphs;
 
 /// Options controlling SVG size and stroke appearance.
 #[derive(Debug, Clone)]
@@ -29,12 +22,6 @@ pub struct SvgOptions {
     pub padding: f64,
     /// Stroke width for unfilled [`DisplayItem::Path`](DisplayItem::Path), in user units.
     pub stroke_width: f64,
-    /// When the `standalone` feature is enabled and this is `true`, glyphs are drawn as filled
-    /// `<path>` outlines using fonts from [`Self::font_dir`]. Otherwise a `<text>` element with
-    /// KaTeX CSS `font-family` names is emitted.
-    pub embed_glyphs: bool,
-    /// Directory containing KaTeX `.ttf` files (same as `ratex_render::RenderOptions::font_dir`).
-    pub font_dir: String,
 }
 
 impl Default for SvgOptions {
@@ -43,8 +30,6 @@ impl Default for SvgOptions {
             font_size: 40.0,
             padding: 10.0,
             stroke_width: 1.5,
-            embed_glyphs: false,
-            font_dir: String::new(),
         }
     }
 }
@@ -55,50 +40,36 @@ impl SvgOptions {
     }
 }
 
-/// Render a display list to a standalone SVG document string.
+/// Render a display list to an SVG document string.
 pub fn render_to_svg(list: &DisplayList, opts: &SvgOptions) -> String {
-    #[cfg(feature = "standalone")]
-    #[cfg(not(feature = "embed-fonts"))]
-    let load_fonts = opts.embed_glyphs && !opts.font_dir.is_empty();
-    #[cfg(feature = "embed-fonts")]
-    let load_fonts = opts.embed_glyphs;
-
-    // Pre-render standalone glyphs while holding the font lock, then drop it.
+    // Pre-render glyph outlines while holding the font lock, then drop it.
     // This avoids self-referential struct issues with FontRef borrowing from the lock guard.
-    #[cfg(feature = "standalone")]
-    let prerendered_glyphs: Option<Vec<Option<standalone::StandaloneGlyph>>> = {
-        if load_fonts {
-            if let Ok(fonts) = ratex_font_loader::load_fonts_for_items(&opts.font_dir, &list.items)
-            {
-                if let Ok(font_refs) = standalone::build_font_refs(&fonts) {
-                    let em = opts.em_px();
-                    let pad = opts.padding;
-                    let mut out = Vec::with_capacity(list.items.len());
-                    for item in &list.items {
-                        let glyph = if let DisplayItem::GlyphPath {
-                            x,
-                            y,
-                            scale,
-                            font,
-                            char_code,
-                            ..
-                        } = item
-                        {
-                            let px = (*x * em + pad) as f32;
-                            let py = (*y * em + pad) as f32;
-                            let glyph_em = (*scale * em) as f32;
-                            standalone::standalone_glyph(
-                                px, py, glyph_em, font, *char_code, &font_refs,
-                            )
-                        } else {
-                            None
-                        };
-                        out.push(glyph);
-                    }
-                    Some(out)
-                } else {
-                    None
+    let prerendered_glyphs: Option<Vec<Option<glyphs::GlyphAsset>>> = {
+        if let Ok(fonts) = ratex_font_loader::load_fonts_for_items("", &list.items) {
+            if let Ok(font_refs) = glyphs::build_font_refs(&fonts) {
+                let em = opts.em_px();
+                let pad = opts.padding;
+                let mut out = Vec::with_capacity(list.items.len());
+                for item in &list.items {
+                    let glyph = if let DisplayItem::GlyphPath {
+                        x,
+                        y,
+                        scale,
+                        font,
+                        char_code,
+                        ..
+                    } = item
+                    {
+                        let px = (*x * em + pad) as f32;
+                        let py = (*y * em + pad) as f32;
+                        let glyph_em = (*scale * em) as f32;
+                        glyphs::outline_glyph(px, py, glyph_em, font, *char_code, &font_refs)
+                    } else {
+                        None
+                    };
+                    out.push(glyph);
                 }
+                Some(out)
             } else {
                 None
             }
@@ -115,8 +86,6 @@ pub fn render_to_svg(list: &DisplayList, opts: &SvgOptions) -> String {
 
     let mut body = String::new();
     for (item_idx, item) in list.items.iter().enumerate() {
-        #[cfg(not(feature = "standalone"))]
-        let _ = item_idx;
         match item {
             DisplayItem::GlyphPath {
                 x,
@@ -134,15 +103,10 @@ pub fn render_to_svg(list: &DisplayList, opts: &SvgOptions) -> String {
                     char_code: *char_code,
                     color,
                 };
-                #[cfg(feature = "standalone")]
-                {
-                    let prerendered = prerendered_glyphs
-                        .as_ref()
-                        .and_then(|v| v.get(item_idx).and_then(|g| g.as_ref()));
-                    emit_glyph_standalone(&mut body, g, opts, prerendered);
-                }
-                #[cfg(not(feature = "standalone"))]
-                emit_glyph_text(&mut body, g, opts);
+                let prerendered = prerendered_glyphs
+                    .as_ref()
+                    .and_then(|v| v.get(item_idx).and_then(|g| g.as_ref()));
+                emit_glyph_outline(&mut body, g, opts, prerendered);
             }
             DisplayItem::Line {
                 x,
@@ -176,7 +140,7 @@ fn wrap_svg(vb_w: f64, vb_h: f64, body: &str) -> String {
     let w = fmt_num(vb_w);
     let h = fmt_num(vb_h);
     format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" height="{h}">{body}</svg>"#
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}pt" height="{h}pt">{body}</svg>"#
     )
 }
 
@@ -253,50 +217,25 @@ fn katex_face(font: &str) -> (&'static str, &'static str, &'static str) {
         "Size3-Regular" => ("KaTeX_Size3", "normal", "normal"),
         "Size4-Regular" => ("KaTeX_Size4", "normal", "normal"),
         "CJK-Regular" => ("sans-serif", "normal", "normal"),
-        "CJK-Fallback" => ("sans-serif", "normal", "normal"),
-        // Stack so SVG `<text>` fallback works across macOS / Windows / Linux.
-        "Emoji-Fallback" => (
-            r#"Apple Color Emoji, "Segoe UI Emoji", "Noto Color Emoji", sans-serif"#,
-            "normal",
-            "normal",
-        ),
         _ => ("KaTeX_Main", "normal", "normal"),
     }
 }
 
-#[cfg(feature = "standalone")]
-fn emit_glyph_standalone(
+fn emit_glyph_outline(
     out: &mut String,
     g: GlyphEmit<'_>,
     opts: &SvgOptions,
-    prerendered: Option<&standalone::StandaloneGlyph>,
+    prerendered: Option<&glyphs::GlyphAsset>,
 ) {
-    if opts.embed_glyphs {
-        if let Some(glyph) = prerendered {
-            match glyph {
-                standalone::StandaloneGlyph::Path(d) => {
-                    let fill = color_to_svg(g.color);
-                    use std::fmt::Write;
-                    let _ = write!(
-                        out,
-                        r#"<path d="{d}" fill="{fill}" fill-rule="nonzero" stroke="none"/>"#
-                    );
-                    return;
-                }
-                standalone::StandaloneGlyph::Image { href, x, y, w, h } => {
-                    use std::fmt::Write;
-                    let x_s = fmt_num(*x as f64);
-                    let y_s = fmt_num(*y as f64);
-                    let w_s = fmt_num(*w as f64);
-                    let h_s = fmt_num(*h as f64);
-                    let _ = write!(
-                        out,
-                        r#"<image href="{href}" x="{x_s}" y="{y_s}" width="{w_s}" height="{h_s}" preserveAspectRatio="none"/>"#
-                    );
-                    return;
-                }
-            }
-        }
+    if let Some(glyph) = prerendered {
+        let glyphs::GlyphAsset::Path(d) = glyph;
+        let fill = color_to_svg(g.color);
+        use std::fmt::Write;
+        let _ = write!(
+            out,
+            r#"<path d="{d}" fill="{fill}" fill-rule="nonzero" stroke="none"/>"#
+        );
+        return;
     }
     emit_glyph_text(out, g, opts);
 }
@@ -564,28 +503,17 @@ mod tests {
                 font_size: 10.0,
                 padding: 0.0,
                 stroke_width: 1.0,
-                embed_glyphs: false,
-                font_dir: String::new(),
             },
         );
         assert!(svg.contains("<rect"));
         assert!(svg.contains("<path"));
-        assert!(svg.contains("<text"));
-        assert!(svg.contains("KaTeX_Math"));
+        assert!(svg.contains("fill-rule=\"nonzero\""));
+        assert!(!svg.contains("<text"));
         assert!(svg.contains("fill=\"rgba(255,0,0,1)\"") || svg.contains("fill=\"rgba(255,0,0,1"));
     }
 
-    #[cfg(feature = "standalone")]
     #[test]
-    fn embed_glyphs_use_path_when_katex_fonts_present() {
-        use std::path::PathBuf;
-
-        let font_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tools/lexer_compare/node_modules/katex/dist/fonts");
-        if !font_dir.join("KaTeX_Math-Italic.ttf").exists() {
-            return;
-        }
-
+    fn svg_glyphs_use_embedded_paths() {
         let list = DisplayList {
             items: vec![DisplayItem::GlyphPath {
                 x: 0.1,
@@ -605,8 +533,6 @@ mod tests {
                 font_size: 10.0,
                 padding: 0.0,
                 stroke_width: 1.0,
-                embed_glyphs: true,
-                font_dir: font_dir.to_string_lossy().into(),
             },
         );
         assert!(svg.contains("<path"));

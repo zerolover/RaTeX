@@ -1,4 +1,4 @@
-//! Glyph outlines as SVG `<path>` via `ab_glyph` (feature `standalone`).
+//! Glyph outlines as SVG `<path>` via `ab_glyph`.
 
 use std::collections::HashMap;
 
@@ -8,9 +8,7 @@ use ratex_font_loader::FontSet;
 
 fn sfnt_collection_index(id: FontId) -> u32 {
     match id {
-        FontId::EmojiFallback => ratex_unicode_font::emoji_font_face_index().unwrap_or(0),
         FontId::CjkRegular => ratex_unicode_font::unicode_font_face_index().unwrap_or(0),
-        FontId::CjkFallback => ratex_unicode_font::fallback_font_face_index().unwrap_or(0),
         _ => 0,
     }
 }
@@ -28,29 +26,21 @@ pub(crate) fn build_font_refs<'a>(
     Ok(font_refs)
 }
 
-/// Vector path or color-emoji raster (`sbix` PNG as `data:image/png`), matching `ratex-render::render_glyph`.
+/// Vector path output matching `ratex-render::render_glyph` geometry.
 #[derive(Debug)]
-pub(crate) enum StandaloneGlyph {
+pub(crate) enum GlyphAsset {
     Path(String),
-    Image {
-        href: String,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-    },
 }
 
-/// Same geometry as `ratex-render`: SVG user space, y downward. Emoji uses bitmap **before** outline
-/// so COLR/sbix faces do not paint invisible vector masks.
-pub(crate) fn standalone_glyph(
+/// Same geometry as `ratex-render`: SVG user space, y downward.
+pub(crate) fn outline_glyph(
     px: f32,
     py: f32,
     glyph_em: f32,
     font_name: &str,
     char_code: u32,
     font_cache: &HashMap<FontId, FontRef<'_>>,
-) -> Option<StandaloneGlyph> {
+) -> Option<GlyphAsset> {
     let font_id = FontId::parse(font_name).unwrap_or(FontId::MainRegular);
     let font = match font_cache.get(&font_id) {
         Some(f) => f,
@@ -64,101 +54,19 @@ pub(crate) fn standalone_glyph(
         return try_system_unicode_fallback_svg(px, py, glyph_em, ch, font_cache, false);
     }
 
-    if font_id == FontId::EmojiFallback {
-        return try_emoji_raster_or_vector_svg(px, py, glyph_em, ch, font, glyph_id);
-    }
-
     if font_id == FontId::CjkRegular {
         if let Some(d) = outline_to_d(px, py, glyph_em, FontId::CjkRegular, font, glyph_id) {
-            return Some(StandaloneGlyph::Path(d));
-        }
-        if let Some(g) = try_emoji_raster_then_vector_svg(px, py, glyph_em, ch, font_cache) {
-            return Some(g);
-        }
-        if let Some(fb) = font_cache.get(&FontId::CjkFallback) {
-            let fid = fb.glyph_id(ch);
-            if fid.0 != 0 {
-                return outline_to_d(px, py, glyph_em, FontId::CjkFallback, fb, fid).map(StandaloneGlyph::Path);
-            }
+            return Some(GlyphAsset::Path(d));
         }
         return None;
     }
 
-    if font_id == FontId::CjkFallback {
-        if let Some(d) = outline_to_d(px, py, glyph_em, FontId::CjkFallback, font, glyph_id) {
-            return Some(StandaloneGlyph::Path(d));
-        }
-        return try_emoji_raster_then_vector_svg(px, py, glyph_em, ch, font_cache);
-    }
-
     if let Some(d) = outline_to_d(px, py, glyph_em, font_id, font, glyph_id) {
-        return Some(StandaloneGlyph::Path(d));
+        return Some(GlyphAsset::Path(d));
     }
 
     let skip_main = font_id == FontId::MainRegular;
     try_system_unicode_fallback_svg(px, py, glyph_em, ch, font_cache, skip_main)
-}
-
-fn try_emoji_png_data_url(px: f32, py: f32, em: f32, ch: char) -> Option<StandaloneGlyph> {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-
-    #[cfg(target_os = "macos")]
-    let request_em = em * 2.0;
-    #[cfg(not(target_os = "macos"))]
-    let request_em = em;
-
-    let strike = ratex_unicode_font::emoji_png_raster_for_char(ch, request_em)?;
-    let ppm = f32::from(strike.pixels_per_em.max(1));
-    let mut scale = em / ppm;
-    // Scale emoji to fit 1.0em layout width if it's wider (prevents overflow).
-    let actual_width_em = f32::from(strike.width) / ppm;
-    let assumed_width = 1.0;
-    if actual_width_em > 0.01 && actual_width_em > assumed_width * 1.01 {
-        scale *= assumed_width / actual_width_em;
-    }
-    let x = px + f32::from(strike.x) * scale;
-    // Match `ratex-render::try_blit_raster_glyph`: `y` is the bitmap bottom in y-up strike space;
-    // then nudge so the strike's vertical center aligns with the math axis (mixed `\text` + math).
-    let mut y = py - (f32::from(strike.y) + f32::from(strike.height)) * scale;
-    let center_strike = (f32::from(strike.y) + f32::from(strike.height) / 2.0) / ppm;
-    let axis = ratex_font::get_global_metrics(0).axis_height as f32;
-    y += (center_strike - axis) * em;
-    let w = f32::from(strike.width) * scale;
-    let h = f32::from(strike.height) * scale;
-    let href = format!("data:image/png;base64,{}", STANDARD.encode(&strike.data));
-    Some(StandaloneGlyph::Image { href, x, y, w, h })
-}
-
-fn try_emoji_raster_then_vector_svg(
-    px: f32,
-    py: f32,
-    em: f32,
-    ch: char,
-    font_cache: &HashMap<FontId, FontRef<'_>>,
-) -> Option<StandaloneGlyph> {
-    if let Some(img) = try_emoji_png_data_url(px, py, em, ch) {
-        return Some(img);
-    }
-    let emoji_font = font_cache.get(&FontId::EmojiFallback)?;
-    let eid = emoji_font.glyph_id(ch);
-    if eid.0 == 0 {
-        return None;
-    }
-    outline_to_d(px, py, em, FontId::EmojiFallback, emoji_font, eid).map(StandaloneGlyph::Path)
-}
-
-fn try_emoji_raster_or_vector_svg(
-    px: f32,
-    py: f32,
-    em: f32,
-    ch: char,
-    font: &FontRef<'_>,
-    glyph_id: ab_glyph::GlyphId,
-) -> Option<StandaloneGlyph> {
-    if let Some(img) = try_emoji_png_data_url(px, py, em, ch) {
-        return Some(img);
-    }
-    outline_to_d(px, py, em, FontId::EmojiFallback, font, glyph_id).map(StandaloneGlyph::Path)
 }
 
 fn try_system_unicode_fallback_svg(
@@ -168,13 +76,13 @@ fn try_system_unicode_fallback_svg(
     ch: char,
     font_cache: &HashMap<FontId, FontRef<'_>>,
     skip_main_regular: bool,
-) -> Option<StandaloneGlyph> {
+) -> Option<GlyphAsset> {
     if !skip_main_regular {
         if let Some(fallback) = font_cache.get(&FontId::MainRegular) {
             let fid = fallback.glyph_id(ch);
             if fid.0 != 0 {
                 if let Some(d) = outline_to_d(px, py, em, FontId::MainRegular, fallback, fid) {
-                    return Some(StandaloneGlyph::Path(d));
+                    return Some(GlyphAsset::Path(d));
                 }
             }
         }
@@ -183,17 +91,8 @@ fn try_system_unicode_fallback_svg(
         let cid = cjk.glyph_id(ch);
         if cid.0 != 0 {
             if let Some(d) = outline_to_d(px, py, em, FontId::CjkRegular, cjk, cid) {
-                return Some(StandaloneGlyph::Path(d));
+                return Some(GlyphAsset::Path(d));
             }
-        }
-    }
-    if let Some(g) = try_emoji_raster_then_vector_svg(px, py, em, ch, font_cache) {
-        return Some(g);
-    }
-    if let Some(fb) = font_cache.get(&FontId::CjkFallback) {
-        let fid = fb.glyph_id(ch);
-        if fid.0 != 0 {
-            return outline_to_d(px, py, em, FontId::CjkFallback, fb, fid).map(StandaloneGlyph::Path);
         }
     }
     None
@@ -211,18 +110,7 @@ fn outline_to_d(
         font_id, font, glyph_id,
     )?;
     let units_per_em = font.units_per_em().unwrap_or(1000.0);
-    let mut scale = em / units_per_em;
-
-    // Emoji outline fallback has no KaTeX metrics; scale it to the 1.0em width that layout
-    // allocates for missing emoji so Windows vector fallback does not overflow.
-    if font_id == FontId::EmojiFallback {
-        let actual_advance = font.h_advance_unscaled(glyph_id);
-        let actual_advance_em = actual_advance / units_per_em;
-        let assumed_width = 1.0;
-        if actual_advance_em > 0.01 && actual_advance_em > assumed_width * 1.01 {
-            scale *= assumed_width / actual_advance_em;
-        }
-    }
+    let scale = em / units_per_em;
 
     let mut d = String::new();
     let mut last_end: Option<(f32, f32)> = None;

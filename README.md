@@ -178,28 +178,23 @@ echo '\ce{H2SO4 + 2NaOH -> Na2SO4 + 2H2O}' | cargo run --release -p ratex-render
 # Default: glyphs as <text> elements (correct display requires KaTeX webfonts)
 echo '\frac{1}{2} + \sqrt{x}' | cargo run --release -p ratex-svg --features cli -- --color '#1E88E5'
 
-# Standalone: embed glyph outlines as <path> — no external fonts needed
+# Self-contained SVG: embed glyph outlines as <path> — no external fonts needed
 echo '\int_0^\infty e^{-x^2} dx = \frac{\sqrt{\pi}}{2}' | \
-  cargo run --release -p ratex-svg --features "cli embed-fonts" -- \
+  cargo run --release -p ratex-svg --features cli -- \
   --output-dir ./out
 ```
 
-The `standalone` feature (enabled by `cli`) reads KaTeX TTF files from `--font-dir` and embeds glyph outlines directly into the SVG, producing a fully self-contained file that renders correctly without any CSS or web fonts.
-
-The `embed-fonts` feature (implicitly enables `standalone`) bundles the same TTFs via the [`ratex-katex-fonts`](crates/ratex-katex-fonts) crate, so no `--font-dir` is needed and builds from crates.io stay self-contained. To refresh bundled fonts after upgrading KaTeX, run [`scripts/sync-katex-ttf-to-font-crate.sh`](scripts/sync-katex-ttf-to-font-crate.sh).
+`ratex-svg` now always embeds glyph outlines directly into the SVG, producing a fully self-contained file that renders correctly without any CSS or web fonts. KaTeX TTFs are bundled via the [`ratex-katex-fonts`](crates/ratex-katex-fonts) crate, so no `--font-dir` is needed. To refresh bundled fonts after upgrading KaTeX, run [`scripts/sync-katex-ttf-to-font-crate.sh`](scripts/sync-katex-ttf-to-font-crate.sh).
 
 ### Render to PDF
 
 ```bash
-# `cli` implies `embed-fonts`: KaTeX TTFs are bundled via ratex-katex-fonts (--font-dir is ignored)
+# PDF export always bundles KaTeX TTFs via ratex-katex-fonts
 echo '\frac{1}{2} + \sqrt{x}' | cargo run --release -p ratex-pdf --features cli -- --output-dir ./out
-
-# Equivalent font loading (explicit embed-fonts)
-echo '\ce{H2SO4 + 2NaOH -> Na2SO4 + 2H2O}' | \
-  cargo run --release -p ratex-pdf --features "cli embed-fonts" -- --output-dir ./out
 ```
 
-The `ratex-pdf` crate writes one `.pdf` per non-empty line from stdin. Options include `--output-dir` (default `output_pdf`), `--font-size`, `--dpr`, and `--inline` (text style instead of display). The `render-pdf` binary always loads fonts from `ratex-katex-fonts`, so `--font-dir` does not change embedding. For library use without `embed-fonts`, set `PdfOptions.font_dir` to your KaTeX TTF directory instead.
+The `ratex-pdf` crate writes one `.pdf` per non-empty line from stdin. Options include `--output-dir` (default `output_pdf`), `--font-size`, `--dpr`, and `--inline` (text style instead of display). PDF export always loads KaTeX fonts from bundled `ratex-katex-fonts`; `PdfOptions` no longer takes a `font_dir`.
+Use `--show-baseline` to draw a short LaTeX-style baseline marker at the formula origin.
 
 ### CJK / Unicode fallback
 

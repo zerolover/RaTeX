@@ -1,4 +1,4 @@
-//! Global outline cache shared by PNG, SVG-standalone, and PDF renderers.
+//! Global outline cache shared by PNG, SVG, and PDF renderers.
 //!
 //! `ab_glyph::Font::outline()` parses the TrueType `glyf` table on every call.
 //! The same glyphs appear repeatedly within a formula (e.g. three `2`s in

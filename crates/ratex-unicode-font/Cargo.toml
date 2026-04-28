@@ -12,3 +12,7 @@ description = "System Unicode font discovery for RaTeX fallback rendering"
 fontdb = { version = "0.23", features = ["std"] }
 system-fonts = "0.1"
 ttf-parser = "0.25"
+
+[[bin]]
+name = "show-unicode-font"
+path = "src/bin/show_unicode_font.rs"

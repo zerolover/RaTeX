@@ -183,26 +183,22 @@ echo '\int_0^\infty e^{-x^2} dx = \frac{\sqrt{\pi}}{2}' | \
   cargo run --release -p ratex-svg --features cli -- \
   --font-dir /path/to/katex/fonts --output-dir ./out
 
-# 或使用 embed-fonts：字体来自 workspace 的 ratex-katex-fonts crate，无需 --font-dir（crates.io 发布也可编译）
+# 自包含 SVG：字形轮廓直接内嵌为路径，不依赖外部字体
 echo '\int_0^\infty e^{-x^2} dx = \frac{\sqrt{\pi}}{2}' | \
-  cargo run --release -p ratex-svg --features "cli embed-fonts" -- \
+  cargo run --release -p ratex-svg --features cli -- \
   --output-dir ./out
 ```
 
-`standalone` feature（由 `cli` 启用）会从 `--font-dir` 下的 KaTeX TTF 提取字形轮廓并内嵌到 SVG。若启用 `embed-fonts`，则 TTF 由 [`ratex-katex-fonts`](crates/ratex-katex-fonts) crate 在编译期嵌入，无需指定字体目录；升级 KaTeX 字体后可运行 [`scripts/sync-katex-ttf-to-font-crate.sh`](scripts/sync-katex-ttf-to-font-crate.sh) 同步到该 crate。
+`ratex-svg` 现在始终把字形轮廓直接内嵌到 SVG，输出文件本身就是自包含的，不依赖 CSS 或 Web 字体。KaTeX TTF 由 [`ratex-katex-fonts`](crates/ratex-katex-fonts) crate 在编译期嵌入，无需指定 `--font-dir`；升级 KaTeX 字体后可运行 [`scripts/sync-katex-ttf-to-font-crate.sh`](scripts/sync-katex-ttf-to-font-crate.sh) 同步到该 crate。
 
 ### 渲染为 PDF
 
 ```bash
-# `cli` 已隐含 `embed-fonts`：字体由 ratex-katex-fonts 打包提供（--font-dir 无效）
+# PDF 导出始终使用 ratex-katex-fonts 打包的 KaTeX TTF
 echo '\frac{1}{2} + \sqrt{x}' | cargo run --release -p ratex-pdf --features cli -- --output-dir ./out
-
-# 与上面字体来源相同（显式写出 embed-fonts）
-echo '\ce{H2SO4 + 2NaOH -> Na2SO4 + 2H2O}' | \
-  cargo run --release -p ratex-pdf --features "cli embed-fonts" -- --output-dir ./out
 ```
 
-`ratex-pdf` 对 stdin 的每一行非空公式输出一个 `.pdf` 文件。支持 `--output-dir`（默认 `output_pdf`）、`--font-size`、`--dpr`、以及 `--inline`（行内公式样式，而非块级 display）。`render-pdf` 可执行文件始终从 `ratex-katex-fonts` 取字形，**`--font-dir` 不会改变嵌入的字体**。若在库中关闭 `embed-fonts`，请在 `PdfOptions.font_dir` 中指定 KaTeX TTF 目录。
+`ratex-pdf` 对 stdin 的每一行非空公式输出一个 `.pdf` 文件。支持 `--output-dir`（默认 `output_pdf`）、`--font-size`、`--dpr`、以及 `--inline`（行内公式样式，而非块级 display）。PDF 导出始终从打包的 `ratex-katex-fonts` 取字形；`PdfOptions` 也不再暴露 `font_dir`。传入 `--show-baseline` 可在公式起点绘制一小段 LaTeX 风格的 baseline 标记。
 
 ### CJK / Unicode 回退字体
 

@@ -27,7 +27,7 @@ RaTeX/
 │   ├── ratex-lexer/               # LaTeX → token stream
 │   ├── ratex-parser/             # Token stream → ParseNode AST
 │   ├── ratex-layout/             # AST → LayoutBox → DisplayList
-│   ├── ratex-katex-fonts/        # KaTeX TTF blobs for embed-fonts (crates.io–safe path)
+│   ├── ratex-katex-fonts/        # KaTeX TTF blobs for bundled-font builds (crates.io–safe path)
 │   ├── ratex-font-loader/        # Shared lazy font loading/cache for PNG/SVG/PDF
 │   ├── ratex-ffi/                # C ABI: LaTeX → DisplayList JSON (+ Android JNI)
 │   ├── ratex-render/             # DisplayList → PNG (tiny-skia, server-side)
@@ -130,13 +130,13 @@ serde_json = "1.0"
 | **ratex-lexer** | LaTeX string → token stream |
 | **ratex-parser** | Token stream → ParseNode AST (macro expansion, functions); auto-numbering for `equation` / `align` / `gather` / `alignat` (non-starred) and trailing-row `\tag` / `\nonumber` / `\notag` |
 | **ratex-layout** | AST → LayoutBox tree → `to_display_list` → DisplayList |
-| **ratex-katex-fonts** | Bundled KaTeX `.ttf` files + embed API; optional dep for `ratex-svg` / `ratex-render` / `ratex-pdf` `embed-fonts` |
+| **ratex-katex-fonts** | Bundled KaTeX `.ttf` files + embed API; used by `ratex-svg`, optional for `ratex-render`, and the built-in PDF font source |
 | **ratex-font-loader** | Shared lazy font source/cache planner for PNG/SVG/PDF; cache entries are keyed by embedded/directory/system source |
 | **ratex-ffi** | C ABI: `ratex_parse_and_layout` → DisplayList JSON; Android `jni` module when targeting Android |
-| **ratex-render** | DisplayList → PNG via tiny-skia + ab_glyph (server/CI); `embed-fonts` uses `ratex-katex-fonts` |
+| **ratex-render** | DisplayList → PNG via tiny-skia + ab_glyph (server/CI); optional `embed-fonts` uses `ratex-katex-fonts` |
 | **ratex-wasm** | WASM: parse + layout → DisplayList JSON for browser |
-| **ratex-svg** | SVG export: DisplayList → SVG string; `standalone` reads TTF from `font_dir`; `embed-fonts` uses `ratex-katex-fonts`; `cli` adds `render-svg` binary |
-| **ratex-pdf** | PDF export: DisplayList → PDF via [pdf-writer](https://docs.rs/pdf-writer) + font subsetting; `embed-fonts` uses `ratex-katex-fonts`; `cli` adds `render-pdf` binary |
+| **ratex-svg** | SVG export: DisplayList → self-contained SVG string with embedded glyph paths; `cli` adds `render-svg` binary |
+| **ratex-pdf** | PDF export: DisplayList → PDF via [pdf-writer](https://docs.rs/pdf-writer) + font subsetting; always uses bundled `ratex-katex-fonts`; `cli` adds `render-pdf` binary |
 | **ratex-unicode-font** | System Unicode / CJK font discovery; used by `ratex-render`, `ratex-svg`, `ratex-pdf` for fallback rendering of CJK / emoji / other glyphs absent from KaTeX font set |
 
 ---
@@ -221,8 +221,8 @@ SVG export crate. Converts a `DisplayList` into an SVG string via `render_to_svg
 crates/ratex-svg/
 ├── Cargo.toml
 └── src/
-    ├── lib.rs           # render_to_svg + SvgOptions; GlyphPath→<text>, Line/Rect→<rect>, Path→<path>
-    ├── standalone.rs    # (feature=standalone) load KaTeX TTF, convert glyph outlines to <path> data
+    ├── lib.rs           # render_to_svg + SvgOptions; GlyphPath→embedded <path>, Line/Rect→<rect>, Path→<path>
+    ├── glyphs.rs        # Load bundled fonts, convert glyph outlines to <path> data
     └── bin/
         └── render_svg.rs  # CLI binary (feature=cli): stdin LaTeX → SVG files
 ```
@@ -231,10 +231,9 @@ crates/ratex-svg/
 
 | Feature | Description |
 |---------|-------------|
-| `standalone` | Embed glyph outlines as `<path>` using `ab_glyph` (requires KaTeX TTF files). Produces self-contained SVGs with no external font dependency. |
-| `cli` | Enables the `render-svg` binary (implies `standalone` + pulls in `ratex-layout` / `ratex-parser`). |
+| `cli` | Enables the `render-svg` binary and pulls in `ratex-layout` / `ratex-parser`. |
 
-**`SvgOptions` fields:** `font_size` (em units, default 40.0), `padding` (default 10.0), `stroke_width` (default 1.5), `embed_glyphs` (use `<path>` outlines), `font_dir` (KaTeX TTF directory for standalone mode).
+**`SvgOptions` fields:** `font_size` (em units, default 40.0), `padding` (default 10.0), `stroke_width` (default 1.5).
 
 ---
 
@@ -247,7 +246,7 @@ crates/ratex-pdf/
 ├── Cargo.toml
 └── src/
     ├── lib.rs
-    ├── fonts.rs     # load KaTeX TTF (disk or embed-fonts), subset, embed CIDFontType2
+    ├── fonts.rs     # load bundled KaTeX TTF, subset, embed CIDFontType2
     ├── renderer.rs  # content stream, paths, text
     └── bin/
         └── render_pdf.rs  # CLI binary (feature=cli): stdin LaTeX → one PDF per line
@@ -257,10 +256,9 @@ crates/ratex-pdf/
 
 | Feature | Description |
 |---------|-------------|
-| `embed-fonts` | Load TTFs from `ratex-katex-fonts` (no on-disk `font_dir` required). |
-| `cli` | Enables the `render-pdf` binary (implies `embed-fonts` + `ratex-layout` / `ratex-parser`). The CLI’s `--font-dir` flag does not affect embedding (same as any `embed-fonts` build). |
+| `cli` | Enables the `render-pdf` binary (`ratex-layout` / `ratex-parser`). |
 
-**`PdfOptions` fields:** `font_size`, `padding`, `stroke_width`, `font_dir` (KaTeX TTF directory when **`embed-fonts` is off**; must be set — `PdfOptions::default` uses an empty `font_dir`. When `embed-fonts` is on, `font_dir` is ignored.)
+**`PdfOptions` fields:** `font_size`, `padding`, `stroke_width`, `show_baseline`.
 
 ---
 

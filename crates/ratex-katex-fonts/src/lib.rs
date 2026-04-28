@@ -1,5 +1,5 @@
 //! KaTeX TrueType fonts embedded at compile time for `ratex-svg` / `ratex-render`
-//! `embed-fonts` features. Files live under this crate's `fonts/` so `cargo publish`
+//! bundled-font builds. Files live under this crate's `fonts/` so `cargo publish`
 //! tarballs stay self-contained.
 
 use std::borrow::Cow;

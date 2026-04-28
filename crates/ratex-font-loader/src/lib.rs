@@ -38,8 +38,6 @@ enum FontSourceKey {
     Embedded,
     Directory(PathBuf),
     SystemUnicode,
-    SystemFallback,
-    SystemEmoji,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -88,7 +86,7 @@ impl FontLoadPlan {
     pub fn for_display_items(items: &[DisplayItem]) -> Self {
         let mut required = HashSet::new();
         let mut optional = HashSet::new();
-        let mut needs_optional_unicode_fallbacks = false;
+        let mut needs_optional_unicode_font = false;
 
         for item in items {
             if let DisplayItem::GlyphPath {
@@ -97,16 +95,16 @@ impl FontLoadPlan {
             {
                 if let Some(font_id) = FontId::parse(font) {
                     match font_id {
-                        FontId::CjkRegular | FontId::CjkFallback | FontId::EmojiFallback => {
+                        FontId::CjkRegular => {
                             required.insert(font_id);
-                            needs_optional_unicode_fallbacks = true;
+                            needs_optional_unicode_font = true;
                         }
                         _ => {
                             required.insert(font_id);
                         }
                     }
-                    if may_need_runtime_unicode_fallback(font_id, *char_code) {
-                        needs_optional_unicode_fallbacks = true;
+                    if may_need_runtime_unicode_font(font_id, *char_code) {
+                        needs_optional_unicode_font = true;
                     }
                 }
             }
@@ -114,10 +112,8 @@ impl FontLoadPlan {
 
         required.insert(FontId::MainRegular);
 
-        if needs_optional_unicode_fallbacks {
+        if needs_optional_unicode_font {
             optional.insert(FontId::CjkRegular);
-            optional.insert(FontId::EmojiFallback);
-            optional.insert(FontId::CjkFallback);
         }
 
         Self { required, optional }
@@ -132,17 +128,25 @@ impl FontLoadPlan {
     }
 }
 
-fn may_need_runtime_unicode_fallback(font_id: FontId, char_code: u32) -> bool {
-    matches!(
-        font_id,
-        FontId::CjkRegular | FontId::CjkFallback | FontId::EmojiFallback
-    ) || (char_code > 0x7f && ratex_font::get_char_metrics(font_id, char_code).is_none())
+fn may_need_runtime_unicode_font(font_id: FontId, char_code: u32) -> bool {
+    font_id == FontId::CjkRegular
+        || (char_code > 0x7f && ratex_font::get_char_metrics(font_id, char_code).is_none())
 }
 
 static FONT_CACHE: OnceLock<RwLock<HashMap<CacheKey, CachedFont>>> = OnceLock::new();
 
 fn cache() -> &'static RwLock<HashMap<CacheKey, CachedFont>> {
     FONT_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// Clear the cached Unicode (CJK) font.
+///
+/// This removes all cached entries for `FontId::CjkRegular` across all font directories,
+/// forcing the font to be reloaded on next access.
+pub fn clear_unicode_font_cache() {
+    if let Ok(mut cached) = cache().write() {
+        cached.retain(|key, _| key.font_id != FontId::CjkRegular);
+    }
 }
 
 pub fn load_fonts_for_items(font_dir: &str, items: &[DisplayItem]) -> Result<FontSet, String> {
@@ -231,8 +235,6 @@ fn cache_key(font_dir: &str, font_id: FontId) -> CacheKey {
 fn source_key(font_dir: &str, font_id: FontId) -> FontSourceKey {
     match font_id {
         FontId::CjkRegular => FontSourceKey::SystemUnicode,
-        FontId::CjkFallback => FontSourceKey::SystemFallback,
-        FontId::EmojiFallback => FontSourceKey::SystemEmoji,
         _ => katex_source_key(font_dir),
     }
 }
@@ -256,8 +258,6 @@ fn normalize_font_dir(font_dir: &str) -> PathBuf {
 fn load_font_bytes(font_dir: &str, font_id: FontId) -> Result<Option<FontBytes>, String> {
     match font_id {
         FontId::CjkRegular => Ok(ratex_unicode_font::load_unicode_font_arc()),
-        FontId::CjkFallback => Ok(ratex_unicode_font::load_fallback_font_arc()),
-        FontId::EmojiFallback => Ok(ratex_unicode_font::load_emoji_font_arc()),
         _ => load_katex_font(font_dir, font_id),
     }
 }
@@ -309,23 +309,19 @@ mod tests {
     }
 
     #[test]
-    fn ascii_katex_glyph_does_not_request_unicode_fallbacks() {
+    fn ascii_katex_glyph_does_not_request_unicode_font() {
         let plan = FontLoadPlan::for_display_items(&[glyph(FontId::MainRegular, 'x' as u32)]);
 
         assert!(plan.required.contains(&FontId::MainRegular));
         assert!(!plan.optional.contains(&FontId::CjkRegular));
-        assert!(!plan.optional.contains(&FontId::EmojiFallback));
-        assert!(!plan.optional.contains(&FontId::CjkFallback));
     }
 
     #[test]
-    fn non_ascii_without_katex_metrics_requests_optional_unicode_fallbacks() {
+    fn non_ascii_without_katex_metrics_requests_optional_unicode_font() {
         let plan = FontLoadPlan::for_display_items(&[glyph(FontId::MainRegular, '⌘' as u32)]);
 
         assert!(plan.required.contains(&FontId::MainRegular));
         assert!(plan.optional.contains(&FontId::CjkRegular));
-        assert!(plan.optional.contains(&FontId::EmojiFallback));
-        assert!(plan.optional.contains(&FontId::CjkFallback));
         assert!(!plan.required.contains(&FontId::CjkRegular));
     }
 
@@ -334,21 +330,19 @@ mod tests {
         let plan = FontLoadPlan::for_display_items(&[glyph(FontId::CjkRegular, '你' as u32)]);
 
         assert!(plan.required.contains(&FontId::CjkRegular));
-        assert!(plan.optional.contains(&FontId::EmojiFallback));
-        assert!(plan.optional.contains(&FontId::CjkFallback));
     }
 
     #[test]
     fn cached_missing_optional_font_counts_as_known() {
         let font_dir = "/tmp/ratex-font-loader-test-missing-optional";
         let mut wanted = HashSet::new();
-        wanted.insert(FontId::EmojiFallback);
+        wanted.insert(FontId::CjkRegular);
 
         let mut cached = HashMap::new();
-        cached.insert(cache_key(font_dir, FontId::EmojiFallback), None);
+        cached.insert(cache_key(font_dir, FontId::CjkRegular), None);
 
         let mut out = HashMap::new();
         assert!(collect_cached(font_dir, &wanted, &cached, &mut out));
-        assert!(!out.contains_key(&FontId::EmojiFallback));
+        assert!(!out.contains_key(&FontId::CjkRegular));
     }
 }

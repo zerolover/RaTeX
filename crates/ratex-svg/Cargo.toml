@@ -6,32 +6,27 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation.workspace = true
-description = "SVG export for RaTeX DisplayList (vector output, optional KaTeX webfonts)"
+description = "SVG export for RaTeX DisplayList (self-contained vector output)"
 
 [features]
 default = []
-## Embed glyphs as `<path>` outlines (`ab_glyph`); requires [`SvgOptions::font_dir`] with KaTeX `.ttf` files.
-standalone = ["dep:ab_glyph", "dep:base64", "dep:ratex-font", "dep:ratex-font-loader", "dep:ratex-unicode-font"]
-## `render-svg` binary: parse + layout from stdin (needs `standalone` for outlined glyphs).
+## `render-svg` binary: parse + layout from stdin.
 cli = ["dep:ratex-layout", "dep:ratex-parser"]
-## Embed font source files in binary. No need for font directory with this feature. Implicitly enables 'standalone' feature.
-embed-fonts = ["standalone", "dep:ratex-katex-fonts", "ratex-font-loader/embed-fonts"]
 
 [dependencies]
 ratex-types = { workspace = true }
-ab_glyph = { version = "0.2", optional = true }
-base64 = { version = "0.22", optional = true }
-ratex-font = { workspace = true, optional = true }
-ratex-font-loader = { workspace = true, optional = true }
+ab_glyph = { version = "0.2" }
+ratex-font = { workspace = true }
+ratex-font-loader = { workspace = true, features = ["embed-fonts"] }
 ratex-layout = { workspace = true, optional = true }
 ratex-parser = { workspace = true, optional = true }
-ratex-katex-fonts = { workspace = true, optional = true }
-ratex-unicode-font = { workspace = true, optional = true }
+ratex-katex-fonts = { workspace = true }
+ratex-unicode-font = { workspace = true }
 
 [[bin]]
 name = "render-svg"
 path = "src/bin/render_svg.rs"
-required-features = ["cli", "standalone"]
+required-features = ["cli"]
 
 [dev-dependencies]
 ratex-layout = { workspace = true }
@@ -42,4 +37,3 @@ resvg = { version = "0.47", default-features = false }
 [[test]]
 name = "golden_svg"
 path = "tests/golden_svg.rs"
-required-features = ["standalone"]

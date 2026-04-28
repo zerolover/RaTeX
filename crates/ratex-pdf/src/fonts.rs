@@ -32,9 +32,7 @@ fn resolve_glyph_id_abglyph(raw_bytes: &[u8], font_id: FontId, char_code: u32) -
 #[inline]
 fn skrifa_collection_index(face_id: FontId) -> u32 {
     match face_id {
-        FontId::EmojiFallback => ratex_unicode_font::emoji_font_face_index().unwrap_or(0),
         FontId::CjkRegular => ratex_unicode_font::unicode_font_face_index().unwrap_or(0),
-        FontId::CjkFallback => ratex_unicode_font::fallback_font_face_index().unwrap_or(0),
         _ => 0,
     }
 }
@@ -102,28 +100,12 @@ pub(crate) fn glyph_has_nonempty_outline(raw_bytes: &[u8], face_id: FontId, gid:
     glyph.draw(settings, &mut pen).is_ok() && pen.draws > 0
 }
 
-/// Codepoints that must use sbix PNG rasters in PDF (not vector subset), when a color emoji
-/// font is available.
-///
-/// **Only** the supplementary emoji blocks are included. Do **not** add whole
-/// Miscellaneous Symbols (`U+2600`–`U+26FF`) or Dingbats: color fonts often have no PNG strike
-/// there (e.g. ★♠♣), and [`embed_emoji_rasters`] would fail the entire PDF. Those glyphs should
-/// embed from `CjkRegular` / fallback outlines like ←↑→↓.
-#[inline]
-pub(crate) fn prefer_color_emoji_raster(char_code: u32) -> bool {
-    matches!(char_code, 0x1F000..=0x1FAFF)
-}
-
-/// Single source of truth for which font face and GID to subset and show (aligned with PNG/SVG).
+/// Single source of truth for which font face and GID to subset and show.
 ///
 /// Order: requested → `MainRegular` → `CjkRegular` (only when the display item was not already
-/// `CjkRegular`) → `EmojiFallback` → `CjkFallback`. `CjkRegular` cmap hits are ignored unless
+/// `CjkRegular`). `CjkRegular` cmap hits are ignored unless
 /// [`glyph_has_nonempty_outline`] is true so narrow fonts (e.g. AppleGothic missing SC hanzi)
-/// fall through. `EmojiFallback` is tried before the broad text face so color emoji are not stuck
-/// behind fonts that lack emoji coverage. `CjkFallback` does not require outlines.
-///
-/// Emoji blocks never settle on `MainRegular` / `CjkRegular` placeholder glyphs so
-/// [`collect_glyph_usage`] can emit `EmojiFallback` rasters.
+/// are treated as missing glyphs.
 pub(crate) fn resolve_pdf_glyph(
     font_data: &RawFontData,
     font_name: &str,
@@ -134,13 +116,7 @@ pub(crate) fn resolve_pdf_glyph(
     // 1. Requested font
     if let Some(bytes) = font_data.get(&font_id) {
         if let Some(gid) = resolve_glyph_id_for_face(bytes, font_id, char_code) {
-            if prefer_color_emoji_raster(char_code) {
-                if font_id == FontId::EmojiFallback {
-                    return Some((font_id, gid));
-                }
-            } else if font_id != FontId::CjkRegular
-                || glyph_has_nonempty_outline(bytes, font_id, gid)
-            {
+            if font_id != FontId::CjkRegular || glyph_has_nonempty_outline(bytes, font_id, gid) {
                 return Some((font_id, gid));
             }
         }
@@ -148,33 +124,17 @@ pub(crate) fn resolve_pdf_glyph(
     // 2. MainRegular
     if let Some(bytes) = font_data.get(&FontId::MainRegular) {
         if let Some(gid) = resolve_glyph_id_for_face(bytes, FontId::MainRegular, char_code) {
-            if !prefer_color_emoji_raster(char_code) {
-                return Some((FontId::MainRegular, gid));
-            }
+            return Some((FontId::MainRegular, gid));
         }
     }
     // 3. CjkRegular — skip when the item already used that face (step 1 tried it).
     if font_id != FontId::CjkRegular {
         if let Some(bytes) = font_data.get(&FontId::CjkRegular) {
             if let Some(gid) = resolve_glyph_id_for_face(bytes, FontId::CjkRegular, char_code) {
-                if glyph_has_nonempty_outline(bytes, FontId::CjkRegular, gid)
-                    && !prefer_color_emoji_raster(char_code)
-                {
+                if glyph_has_nonempty_outline(bytes, FontId::CjkRegular, gid) {
                     return Some((FontId::CjkRegular, gid));
                 }
             }
-        }
-    }
-    // 4. EmojiFallback (color emoji — before broad text fallback, aligned with PNG)
-    if let Some(bytes) = font_data.get(&FontId::EmojiFallback) {
-        if let Some(gid) = resolve_glyph_id_for_face(bytes, FontId::EmojiFallback, char_code) {
-            return Some((FontId::EmojiFallback, gid));
-        }
-    }
-    // 5. CjkFallback
-    if let Some(bytes) = font_data.get(&FontId::CjkFallback) {
-        if let Some(gid) = resolve_glyph_id_for_face(bytes, FontId::CjkFallback, char_code) {
-            return Some((FontId::CjkFallback, gid));
         }
     }
     None
@@ -194,88 +154,19 @@ pub(crate) struct FontUsage {
     pub glyphs: BTreeMap<u16, GlyphInfo>,
 }
 
-/// One emoji codepoint that resolves to `EmojiFallback`, with the largest `glyph_em` seen (px).
-pub(crate) struct EmojiRasterUsage {
-    pub char_code: u32,
-    pub max_glyph_em_px: f32,
-}
-
-pub(crate) struct CollectedGlyphs {
-    pub font_usages: Vec<FontUsage>,
-    pub emoji_rasters: Vec<EmojiRasterUsage>,
-}
-
-/// Embedded color-emoji bitmap (PDF image XObject), aligned with PNG/SVG sbix strikes.
-pub(crate) struct EmbeddedEmojiImage {
-    pub char_code: u32,
-    pub res_name: String,
-    pub image_ref: Ref,
-    pub strike_x: i16,
-    pub strike_y: i16,
-    pub width_px: u16,
-    pub height_px: u16,
-    pub pixels_per_em: u16,
-}
-
-/// Collect font subset usage and emoji raster usage (`EmojiFallback` is drawn as images, not Type0).
+/// Collect font subset usage.
 pub(crate) fn collect_glyph_usage(
     items: &[ratex_types::display_item::DisplayItem],
     font_data: &RawFontData,
-    body_em: f64,
-) -> CollectedGlyphs {
+) -> Vec<FontUsage> {
     let mut usage_map: HashMap<FontId, HashSet<(u16, u32)>> = HashMap::new();
-    let mut emoji_max: HashMap<u32, f32> = HashMap::new();
 
     for item in items {
         if let ratex_types::display_item::DisplayItem::GlyphPath {
-            font,
-            char_code,
-            scale,
-            ..
+            font, char_code, ..
         } = item
         {
-            #[cfg(target_os = "macos")]
-            let glyph_em = ((*scale * body_em) as f32) * 2.0;
-            #[cfg(not(target_os = "macos"))]
-            let glyph_em = (*scale * body_em) as f32;
-            // Always collect sbix rasters for emoji / dingbat blocks when a color font is loaded,
-            // independent of [`resolve_pdf_glyph`] (avoids edge cases where CJK/Main still "claim" a CP).
-            // BUT: only if the emoji font actually has PNG rasters (Windows COLR fonts don't).
-            if prefer_color_emoji_raster(*char_code)
-                && ratex_unicode_font::load_emoji_font_arc().is_some()
-            {
-                // Check if PNG raster is actually available before collecting as emoji
-                let ch = char::from_u32(*char_code);
-                let has_png = ch
-                    .and_then(|c| ratex_unicode_font::emoji_png_raster_for_char(c, glyph_em))
-                    .is_some();
-
-                if has_png {
-                    emoji_max
-                        .entry(*char_code)
-                        .and_modify(|m| *m = (*m).max(glyph_em))
-                        .or_insert(glyph_em);
-                    continue;
-                }
-                // If no PNG available, fall through to vector outline rendering
-            }
             if let Some((face, gid)) = resolve_pdf_glyph(font_data, font, *char_code) {
-                if face == FontId::EmojiFallback {
-                    // Check if PNG raster is available
-                    let ch = char::from_u32(*char_code);
-                    let has_png = ch
-                        .and_then(|c| ratex_unicode_font::emoji_png_raster_for_char(c, glyph_em))
-                        .is_some();
-
-                    if has_png {
-                        emoji_max
-                            .entry(*char_code)
-                            .and_modify(|m| *m = (*m).max(glyph_em))
-                            .or_insert(glyph_em);
-                        continue;
-                    }
-                    // If no PNG, treat as regular vector glyph
-                }
                 usage_map.entry(face).or_default().insert((gid, *char_code));
             }
         }
@@ -292,131 +183,7 @@ pub(crate) fn collect_glyph_usage(
         })
         .collect();
     font_usages.sort_by_key(|u| u.font_id.as_str().to_string());
-
-    let mut emoji_rasters: Vec<EmojiRasterUsage> = emoji_max
-        .into_iter()
-        .map(|(char_code, max_glyph_em_px)| EmojiRasterUsage {
-            char_code,
-            max_glyph_em_px,
-        })
-        .collect();
-    emoji_rasters.sort_by_key(|e| e.char_code);
-
-    CollectedGlyphs {
-        font_usages,
-        emoji_rasters,
-    }
-}
-
-/// Write PNG sbix strikes as DeviceRGB image XObjects with an SMask for transparency.
-///
-/// Skips emoji that don't have PNG rasters (e.g., Windows COLR fonts) — they should have been
-/// filtered out by [`collect_glyph_usage`], but this provides a safety net.
-pub(crate) fn embed_emoji_rasters(
-    pdf: &mut Pdf,
-    alloc: &mut Ref,
-    usages: &[EmojiRasterUsage],
-) -> Result<Vec<EmbeddedEmojiImage>, String> {
-    let mut out = Vec::with_capacity(usages.len());
-    for (i, u) in usages.iter().enumerate() {
-        let ch = char::from_u32(u.char_code)
-            .ok_or_else(|| format!("invalid char code {}", u.char_code))?;
-        let Some(strike) = ratex_unicode_font::emoji_png_raster_for_char(ch, u.max_glyph_em_px)
-        else {
-            // No PNG raster available (e.g., Windows COLR emoji). Skip — should have been
-            // filtered by collect_glyph_usage, but this prevents a hard error.
-            continue;
-        };
-
-        let (w, h, rgba) = decode_png_rgba8(&strike.data)?;
-        if w != u32::from(strike.width) || h != u32::from(strike.height) {
-            return Err(format!(
-                "PNG size mismatch for U+{:04X}: got {}x{}, expected {}x{}",
-                u.char_code, w, h, strike.width, strike.height
-            ));
-        }
-
-        let mut rgb = Vec::with_capacity((w * h * 3) as usize);
-        let mut alpha = Vec::with_capacity((w * h) as usize);
-        let mut has_transparency = false;
-        for p in rgba.chunks_exact(4) {
-            rgb.extend_from_slice(&[p[0], p[1], p[2]]);
-            alpha.push(p[3]);
-            if p[3] != 255 {
-                has_transparency = true;
-            }
-        }
-        let encoded_rgb = miniz_oxide::deflate::compress_to_vec_zlib(&rgb, 6);
-
-        let image_ref = alloc.bump();
-
-        let smask_ref = if has_transparency {
-            let r = alloc.bump();
-            let encoded_alpha = miniz_oxide::deflate::compress_to_vec_zlib(&alpha, 6);
-            let mut mask = pdf.image_xobject(r, &encoded_alpha);
-            mask.filter(Filter::FlateDecode);
-            mask.width(w as i32);
-            mask.height(h as i32);
-            mask.color_space().device_gray();
-            mask.bits_per_component(8);
-            mask.finish();
-            Some(r)
-        } else {
-            None
-        };
-
-        let mut image = pdf.image_xobject(image_ref, &encoded_rgb);
-        image.filter(Filter::FlateDecode);
-        image.width(w as i32);
-        image.height(h as i32);
-        image.color_space().device_rgb();
-        image.bits_per_component(8);
-        if let Some(r) = smask_ref {
-            image.s_mask(r);
-        }
-        image.finish();
-
-        out.push(EmbeddedEmojiImage {
-            char_code: u.char_code,
-            res_name: format!("E{i}"),
-            image_ref,
-            strike_x: strike.x,
-            strike_y: strike.y,
-            width_px: strike.width,
-            height_px: strike.height,
-            pixels_per_em: strike.pixels_per_em,
-        });
-    }
-    Ok(out)
-}
-
-fn decode_png_rgba8(data: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
-    let mut dec = png::Decoder::new(std::io::Cursor::new(data));
-    dec.set_transformations(png::Transformations::EXPAND);
-    let mut reader = dec.read_info().map_err(|e| format!("png: {e}"))?;
-    let mut buf = vec![0u8; reader.output_buffer_size()];
-    let info = reader
-        .next_frame(&mut buf)
-        .map_err(|e| format!("png frame: {e}"))?;
-    let (w, h) = (info.width, info.height);
-    let expected_rgba = (w * h * 4) as usize;
-    let expected_rgb = (w * h * 3) as usize;
-    match buf.len() {
-        l if l == expected_rgba => Ok((w, h, buf)),
-        l if l == expected_rgb => {
-            let mut rgba = Vec::with_capacity(expected_rgba);
-            for p in buf.chunks_exact(3) {
-                rgba.extend_from_slice(&[p[0], p[1], p[2], 255]);
-            }
-            Ok((w, h, rgba))
-        }
-        _ => Err(format!(
-            "unexpected PNG data size: {} bytes for {}x{}",
-            buf.len(),
-            w,
-            h
-        )),
-    }
+    font_usages
 }
 
 /// Result of embedding one font into the PDF.
@@ -638,8 +405,6 @@ mod macos_cjk_pdf_tests {
     use std::path::Path;
 
     const APPLE_GOTHIC: &str = "/System/Library/Fonts/Supplemental/AppleGothic.ttf";
-    const ARIAL_UNICODE: &str = "/System/Library/Fonts/Supplemental/Arial Unicode.ttf";
-
     #[test]
     fn applegothic_missing_sc_hanzi_abglyph_sees_unmapped() {
         let bytes = std::fs::read(APPLE_GOTHIC).expect("AppleGothic");
@@ -652,43 +417,18 @@ mod macos_cjk_pdf_tests {
     }
 
     #[test]
-    fn resolve_pdf_glyph_falls_back_for_missing_sc_in_applegothic() {
+    fn resolve_pdf_glyph_rejects_missing_sc_in_applegothic() {
         let ag = std::fs::read(APPLE_GOTHIC).expect("AppleGothic");
-        let au = std::fs::read(ARIAL_UNICODE).expect("Arial Unicode");
         let main_path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fonts/KaTeX_Main-Regular.ttf");
         let main = std::fs::read(main_path).expect("KaTeX_Main-Regular");
         let mut data = HashMap::new();
         data.insert(FontId::MainRegular, main);
         data.insert(FontId::CjkRegular, ag);
-        data.insert(FontId::CjkFallback, au);
         let data: RawFontData = data.into();
         for cp in [0x6C27u32, 0x78B3u32] {
             let r = resolve_pdf_glyph(&data, "CJK-Regular", cp);
-            assert!(
-                matches!(r, Some((FontId::CjkFallback, _))),
-                "U+{cp:04X}: expected CjkFallback, got {r:?}"
-            );
+            assert!(r.is_none(), "U+{cp:04X}: expected missing glyph, got {r:?}");
         }
-    }
-
-    /// Regression: skrifa Main cmap could map emoji to a GID and block `EmojiFallback`; `ab_glyph` must not.
-    #[test]
-    fn resolve_pdf_glyph_uses_emoji_face_for_grinning() {
-        let ag = std::fs::read(APPLE_GOTHIC).expect("AppleGothic");
-        let main_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fonts/KaTeX_Main-Regular.ttf");
-        let main = std::fs::read(main_path).expect("KaTeX_Main-Regular");
-        let emoji = ratex_unicode_font::load_emoji_font_arc().expect("system emoji font");
-        let mut data = HashMap::new();
-        data.insert(FontId::MainRegular, main);
-        data.insert(FontId::CjkRegular, ag);
-        data.insert(FontId::EmojiFallback, (*emoji).clone());
-        let data: RawFontData = data.into();
-        let r = resolve_pdf_glyph(&data, "CJK-Regular", 0x1F600);
-        assert!(
-            matches!(r, Some((FontId::EmojiFallback, _))),
-            "expected EmojiFallback for U+1F600, got {r:?}"
-        );
     }
 }

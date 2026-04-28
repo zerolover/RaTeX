@@ -1,97 +1,70 @@
-//! Discover a system Unicode font for fallback rendering of glyphs not present in KaTeX fonts.
+//! Discover a system Unicode font for rendering glyphs not present in KaTeX fonts.
 //!
 //! Discovery entry points:
 //! - `load_unicode_font_arc()` — respects `RATEX_UNICODE_FONT` (highest priority), then system fonts.
-//! - `load_fallback_font_arc()` — always discovers a system font, ignoring `RATEX_UNICODE_FONT`.
-//!   Useful as a second-level fallback when the primary font doesn't cover a glyph (e.g. emoji
-//!   missing from a CJK-only `RATEX_UNICODE_FONT`).
-//! - `load_emoji_font_arc()` — color / emoji faces (e.g. Apple Color Emoji) when `CjkFallback` still
-//!   has no usable outline for a codepoint (common with Arial Unicode + BMP emoji).
-//! - `unicode_font_face_index` / `fallback_font_face_index` / `emoji_font_face_index` — TTC face
-//!   indices for `FontRef::try_from_slice_and_index` when discovery returns a font collection.
+//! - `unicode_font_face_index` — TTC face index for
+//!   `FontRef::try_from_slice_and_index` when discovery returns a font collection.
 //!
 //! Each result is cached in a `OnceLock` and computed at most once per process.
 
-mod emoji_raster;
-
-pub use emoji_raster::{emoji_png_raster_for_char, emoji_raster_for_char, EmojiRasterStrike};
-
-use std::sync::{Arc, OnceLock};
-use system_fonts::{find_for_system_locale, FontStyle, FoundFontSource};
+use std::sync::{Arc, RwLock};
 
 /// `(full font file bytes, face index within TTC or 0 for single-font / unknown collection face)`.
-static UNICODE_FONT: OnceLock<Option<(Arc<Vec<u8>>, u32)>> = OnceLock::new();
-static SYSTEM_FALLBACK_FONT: OnceLock<Option<(Arc<Vec<u8>>, u32)>> = OnceLock::new();
-/// `(full font file bytes, face index within TTC or 0 for single font)`.
-static EMOJI_FONT: OnceLock<Option<(Arc<Vec<u8>>, u32)>> = OnceLock::new();
+static UNICODE_FONT: RwLock<Option<(Arc<Vec<u8>>, u32)>> = RwLock::new(None);
 
-/// Raw TTF/OTF bytes of a discovered Unicode font, or `None` if no suitable font was found.
+/// Raw TTF/OTF bytes of a discovered primary Unicode font, or `None` if none is found.
 ///
-/// Checks (in order):
-/// 1. `RATEX_UNICODE_FONT` environment variable
-/// 2. Hard-coded system paths (Linux, macOS, Windows)
-/// 3. `fontdb` system font database (SansSerif query, then brute-force)
+/// Checks, in order:
+/// 1. `RATEX_UNICODE_FONT`
+/// 2. Hard-coded system font paths
+/// 3. `fontdb` system discovery
 ///
-/// The result is cached after the first call.
+/// The result is cached after the first successful or failed lookup.
 pub fn load_unicode_font_arc() -> Option<Arc<Vec<u8>>> {
-    UNICODE_FONT
-        .get_or_init(load_unicode_fallback_font)
-        .as_ref()
-        .map(|(bytes, _)| Arc::clone(bytes))
+    let read = UNICODE_FONT.read().unwrap();
+    if let Some((bytes, _)) = read.as_ref() {
+        return Some(Arc::clone(bytes));
+    }
+    drop(read);
+
+    let font = load_unicode_fallback_font();
+    *UNICODE_FONT.write().unwrap() = font.clone();
+    font.as_ref().map(|(bytes, _)| Arc::clone(bytes))
 }
 
 /// Collection index for the cached primary Unicode face (`0` when not a collection).
 pub fn unicode_font_face_index() -> Option<u32> {
-    UNICODE_FONT
-        .get_or_init(load_unicode_fallback_font)
-        .as_ref()
-        .map(|(_, i)| *i)
+    let read = UNICODE_FONT.read().unwrap();
+    if let Some((_, index)) = read.as_ref() {
+        return Some(*index);
+    }
+    drop(read);
+
+    let font = load_unicode_fallback_font();
+    *UNICODE_FONT.write().unwrap() = font.clone();
+    font.as_ref().map(|(_, index)| *index)
 }
 
-/// System fallback font for characters not covered by the primary unicode font.
+/// Set a custom Unicode font from a spec string.
 ///
-/// Always skips `RATEX_UNICODE_FONT` and discovers a font from system paths / fontdb.
-/// Intended for use as `CjkFallback` — a second-level fallback when a glyph is `.notdef`
-/// in the primary CJK font (e.g. emoji when `RATEX_UNICODE_FONT` points to a CJK-only font).
+/// Spec format: `path`, `path#index`, or `path#FamilyName`.
 ///
-/// The result is cached after the first call.
-pub fn load_fallback_font_arc() -> Option<Arc<Vec<u8>>> {
-    SYSTEM_FALLBACK_FONT
-        .get_or_init(discover_system_font)
-        .as_ref()
-        .map(|(bytes, _)| Arc::clone(bytes))
+/// Returns `true` if the font was successfully loaded and set.
+///
+/// Note: This only updates the cache owned by this crate. Callers that keep
+/// derived font caches must invalidate them separately.
+pub fn set_unicode_font(spec: &str) -> bool {
+    if let Some(font) = load_font_spec(spec) {
+        *UNICODE_FONT.write().unwrap() = Some(font);
+        true
+    } else {
+        false
+    }
 }
 
-/// Collection index for the cached fallback Unicode face (`0` when not a collection).
-pub fn fallback_font_face_index() -> Option<u32> {
-    SYSTEM_FALLBACK_FONT
-        .get_or_init(discover_system_font)
-        .as_ref()
-        .map(|(_, i)| *i)
-}
-
-/// Raw font bytes for a system emoji face (color font), or `None` if none was found.
-///
-/// Uses well-known paths (`.ttc` / `.ttf`) via `fontdb::Database::load_font_file`, then
-/// `load_system_fonts` and family queries. Ignores `RATEX_UNICODE_FONT`.
-///
-/// **Note:** Many emoji fonts are bitmap/COLR-only; outline rasterization may still yield empty
-/// paths for some codepoints. PDF embedding of color fonts may also be limited.
-///
-/// The result is cached after the first call.
-pub fn load_emoji_font_arc() -> Option<Arc<Vec<u8>>> {
-    EMOJI_FONT
-        .get_or_init(discover_emoji_font)
-        .as_ref()
-        .map(|(bytes, _)| Arc::clone(bytes))
-}
-
-/// Collection index for the cached emoji face (`0` when the font is not a TTC).
-pub fn emoji_font_face_index() -> Option<u32> {
-    EMOJI_FONT
-        .get_or_init(discover_emoji_font)
-        .as_ref()
-        .map(|(_, i)| *i)
+/// Clear the cached Unicode font, forcing re-discovery on next access.
+pub fn clear_unicode_font() {
+    *UNICODE_FONT.write().unwrap() = None;
 }
 
 /// TrueType / OpenType **single** font (not `.ttc`). For collections see [`is_sfnt_container`].
@@ -123,8 +96,9 @@ fn load_unicode_fallback_font() -> Option<(Arc<Vec<u8>>, u32)> {
 /// Discover a font from system paths and locale-aware system-fonts presets (does NOT check
 /// `RATEX_UNICODE_FONT`).
 ///
-/// Prioritizes fonts with broad Unicode coverage (emoji, symbols, CJK) so that the fallback
-/// is useful even when the primary font (e.g. a narrow Korean font) lacks many glyphs.
+/// Prioritizes fonts with broad Unicode coverage (symbols, CJK) so the discovered
+/// system Unicode font remains broadly usable even when a user-selected font
+/// (e.g. a narrow Korean font) lacks many glyphs.
 fn discover_system_font() -> Option<(Arc<Vec<u8>>, u32)> {
     // 1. Typical system paths with broad Unicode coverage
     #[rustfmt::skip]
@@ -137,38 +111,60 @@ fn discover_system_font() -> Option<(Arc<Vec<u8>>, u32)> {
         // Windows
         "C:\\Windows\\Fonts\\NotoSansSC-VF.ttf",
         "C:\\Windows\\Fonts\\msyh.ttc#Microsoft YaHei",
+        "C:\\Windows\\Fonts\\Deng.ttf",
     ];
 
     for &spec in candidates {
         if let Some(font) = load_font_spec(spec) {
-            eprintln!("[ratex-unicode-font] found via builtin path: {}", spec);
+            eprintln!("[ratex-unicode-font] found system font: {}", spec);
             return Some(font);
         }
     }
 
-    // 2. Locale-aware prioritized candidates from system-fonts.
-    let (_locale, region, fonts) = find_for_system_locale(FontStyle::Sans);
-    for found in fonts {
-        let FoundFontSource::Path(path) = found.source else {
-            continue;
-        };
+    // 2. fontdb — search for well-known broad-coverage families first.
+    let mut db = fontdb::Database::new();
+    db.load_system_fonts();
 
-        let spec = if path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("ttc"))
-        {
-            format!("{}#{}", path.display(), found.family)
-        } else {
-            path.display().to_string()
-        };
+    #[cfg(target_os = "macos")]
+    let fallback_families: &[&str] = &[
+        "Arial Unicode MS",
+        "Noto Sans CJK SC",
+        "Noto Sans SC",
+        "PingFang SC",
+    ];
+    #[cfg(target_os = "linux")]
+    let fallback_families: &[&str] = &[
+        "Noto Sans CJK SC",
+        "Noto Sans SC",
+    ];
+    #[cfg(target_os = "windows")]
+    let fallback_families: &[&str] = &[
+        "Arial Unicode MS",
+        "Noto Sans CJK SC",
+        "Noto Sans SC",
+        "Microsoft YaHei",
+    ];
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    let fallback_families: &[&str] = &[];
 
-        if let Some(font) = load_font_spec(&spec) {
-            eprintln!(
-                "[ratex-unicode-font] found via system-fonts: {} ({region:?})",
-                spec
-            );
-            return Some(font);
+    for family in fallback_families {
+        let query = fontdb::Query {
+            families: &[fontdb::Family::Name(family)],
+            weight: fontdb::Weight::NORMAL,
+            stretch: fontdb::Stretch::Normal,
+            style: fontdb::Style::Normal,
+        };
+        if let Some(id) = db.query(&query) {
+            if let Some(pair) = db
+                .with_face_data(id, |data, index| {
+                    is_sfnt_container(data).then(|| (data.to_vec(), index))
+                })
+                .flatten()
+            {
+                let bytes = Arc::new(pair.0);
+                eprintln!("[ratex-unicode-font] found via fontdb: {} (face index {})", family, pair.1);
+                return Some((bytes, pair.1));
+            }
         }
     }
 
@@ -230,42 +226,6 @@ fn find_face_index_by_family(path: &str, family_hint: &str) -> Option<u32> {
             .then_some(face.index)
     });
     face_index
-}
-
-fn discover_emoji_font() -> Option<(Arc<Vec<u8>>, u32)> {
-    let mut db = fontdb::Database::new();
-    db.load_system_fonts();
-
-    #[cfg(target_os = "macos")]
-    let emoji_families: &[&str] = &["Apple Color Emoji"];
-    #[cfg(target_os = "linux")]
-    let emoji_families: &[&str] = &["Noto Color Emoji", "Noto Emoji"];
-    #[cfg(target_os = "windows")]
-    let emoji_families: &[&str] = &["Segoe UI Emoji"];
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    let emoji_families: &[&str] = &[];
-
-    for family in emoji_families {
-        let query = fontdb::Query {
-            families: &[fontdb::Family::Name(family)],
-            weight: fontdb::Weight::NORMAL,
-            stretch: fontdb::Stretch::Normal,
-            style: fontdb::Style::Normal,
-        };
-        if let Some(id) = db.query(&query) {
-            if let Some(pair) = db
-                .with_face_data(id, |data, index| {
-                    is_sfnt_container(data).then(|| (data.to_vec(), index))
-                })
-                .flatten()
-            {
-                let bytes = Arc::new(pair.0);
-                return Some((bytes, pair.1));
-            }
-        }
-    }
-
-    None
 }
 
 #[cfg(test)]

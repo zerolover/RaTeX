@@ -7,8 +7,8 @@
 #   ./scripts/test-unicode-font.sh --renderer render|render-svg|render-pdf  # single renderer
 #   ./scripts/test-unicode-font.sh --build      # rebuild binaries first, then test
 #
-# Note: render-svg requires standalone feature for CJK glyph paths.
-#       Use --build flag to rebuild all three binaries with correct features.
+# Note: render-svg always embeds glyph paths for CJK fallback.
+#       Use --build flag to rebuild all three binaries first.
 #
 # Each font gets its own output subdirectory under test-output/.
 # Set BIN_DIR to override the binary location (default: target/release).
@@ -153,7 +153,7 @@ main() {
   if [[ $_do_build -eq 1 ]]; then
     bold "Building renderers..."
     cargo build --release -p ratex-render --bin render || { err "render build failed"; exit 1; }
-    cargo build --release -p ratex-svg --features "cli,standalone" --bin render-svg || { err "render-svg build failed"; exit 1; }
+    cargo build --release -p ratex-svg --features "cli" --bin render-svg || { err "render-svg build failed"; exit 1; }
     cargo build --release -p ratex-pdf --features "cli" --bin render-pdf || { err "render-pdf build failed"; exit 1; }
     ok "All binaries built"
   fi

@@ -1,6 +1,8 @@
 /target
 /output**
 Cargo.lock
+output**
+dist
 # Machine-specific Cargo cross-compilation config (use env vars instead)
 /.cargo/
 *.pdb

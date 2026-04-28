@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copy KaTeX *.ttf into crates/ratex-katex-fonts/fonts/ for publishing / embed-fonts.
+# Copy KaTeX *.ttf into crates/ratex-katex-fonts/fonts/ for publishing / bundled-font builds.
 # Source: first existing of repo fonts/, or tools/lexer_compare/node_modules/katex/dist/fonts/.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

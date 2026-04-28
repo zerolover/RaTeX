@@ -11,23 +11,22 @@ description = "PDF export for RaTeX DisplayList using pdf-writer"
 [dependencies]
 ratex-types = { workspace = true }
 ratex-font  = { workspace = true }
-ratex-font-loader = { workspace = true }
+ratex-font-loader = { workspace = true, features = ["embed-fonts"] }
 pdf-writer  = "0.14"
-subsetter   = "0.2"
+# Use git dependency to resolve version conflict: subsetter 0.2.3 on crates.io depends on skrifa 0.37,
+# but we need skrifa 0.42. The main branch has been updated but 0.2.4 is not yet released.
+subsetter   = { git = "https://github.com/typst/subsetter", rev = "4de930f8d92d3cf29bbcdd3e3591adbe62ca1631" }
 skrifa      = "0.42"
 ab_glyph    = "0.2"
 miniz_oxide = "0.9"
-png = "0.17"
 ratex-unicode-font = { workspace = true }
 
 ratex-layout      = { workspace = true, optional = true }
 ratex-parser      = { workspace = true, optional = true }
-ratex-katex-fonts = { workspace = true, optional = true }
 
 [features]
 default = []
-embed-fonts = ["dep:ratex-katex-fonts", "ratex-font-loader/embed-fonts"]
-cli = ["embed-fonts", "dep:ratex-layout", "dep:ratex-parser"]
+cli = ["dep:ratex-layout", "dep:ratex-parser"]
 
 [[bin]]
 name = "render-pdf"

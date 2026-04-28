@@ -1,4 +1,4 @@
-//! Rasterize standalone SVG (path glyphs) with resvg and compare to KaTeX PNG fixtures.
+//! Rasterize self-contained SVG (path glyphs) with resvg and compare to KaTeX PNG fixtures.
 //! Mirrors `ratex-render/tests/golden_test.rs` ink-based scoring.
 
 use std::path::PathBuf;
@@ -19,13 +19,6 @@ fn project_root() -> PathBuf {
         .parent()
         .unwrap()
         .to_path_buf()
-}
-
-fn font_dir() -> String {
-    project_root()
-        .join("fonts")
-        .to_string_lossy()
-        .to_string()
 }
 
 fn load_png(path: &std::path::Path) -> Option<(Vec<u8>, u32, u32)> {
@@ -222,13 +215,10 @@ fn run_golden_svg_suite(
         return;
     }
 
-    let fd = font_dir();
     let svg_opts = SvgOptions {
         font_size: 40.0 * dpr,
         padding: 10.0 * dpr,
         stroke_width: 1.5 * dpr,
-        embed_glyphs: true,
-        font_dir: fd,
     };
     let layout_opts = LayoutOptions::default();
 
@@ -341,37 +331,4 @@ fn golden_svg_mhchem_pass_rate() {
         50.0,
         2.0,
     );
-}
-
-/// Standalone SVG: color emoji embedded as `data:image/png;base64` (Apple Color Emoji sbix).
-#[cfg(target_os = "macos")]
-mod macos_emoji_svg {
-    use ratex_layout::to_display_list;
-    use ratex_layout::{layout, LayoutOptions};
-    use ratex_parser::parser::parse;
-    use ratex_svg::{render_to_svg, SvgOptions};
-
-    #[test]
-    fn formula12_standalone_svg_has_png_data_url_for_emoji() {
-        std::env::set_var(
-            "RATEX_UNICODE_FONT",
-            "/System/Library/Fonts/Supplemental/AppleGothic.ttf",
-        );
-        let ast = parse(r"\text{😀} \quad x").unwrap();
-        let lbox = layout(&ast, &LayoutOptions::default());
-        let dl = to_display_list(&lbox);
-        let opts = SvgOptions {
-            font_size: 40.0,
-            padding: 10.0,
-            stroke_width: 1.5,
-            embed_glyphs: true,
-            font_dir: concat!(env!("CARGO_MANIFEST_DIR"), "/../../fonts").to_string(),
-        };
-        let svg = render_to_svg(&dl, &opts);
-        assert!(
-            svg.contains("data:image/png;base64,"),
-            "expected embedded PNG for emoji, got snippet: {}",
-            &svg[..svg.len().min(500)]
-        );
-    }
 }

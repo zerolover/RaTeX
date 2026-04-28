@@ -1,4 +1,4 @@
-//! Batch-export golden cases to standalone SVG (path glyphs, same scale as `ratex-render` + DPR).
+//! Batch-export golden cases to self-contained SVG (path glyphs, same scale as `ratex-render` + DPR).
 
 use std::io::{self, BufRead};
 use std::path::PathBuf;
@@ -11,13 +11,6 @@ use ratex_types::math_style::MathStyle;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-
-    let font_dir = args
-        .iter()
-        .position(|a| a == "--font-dir")
-        .and_then(|i| args.get(i + 1))
-        .cloned()
-        .unwrap_or_else(default_font_dir);
 
     let output_dir = args
         .iter()
@@ -59,8 +52,6 @@ fn main() {
         font_size: font_size * dpr,
         padding: 10.0 * dpr,
         stroke_width: 1.5 * dpr,
-        embed_glyphs: true,
-        font_dir,
     };
 
     let inline = args.contains(&"--inline".to_string());
@@ -101,23 +92,6 @@ fn svg_formula(
     let lbox = layout(&ast, layout_opts);
     let display_list = to_display_list(&lbox);
     Ok(render_to_svg(&display_list, svg_opts))
-}
-
-fn default_font_dir() -> String {
-    const MARKER: &str = "KaTeX_Main-Regular.ttf";
-    let candidates = [
-        "fonts",
-        "../fonts",
-        "../../fonts",
-        "../../../fonts",
-    ];
-    for c in &candidates {
-        let p = std::path::Path::new(c);
-        if p.join(MARKER).is_file() {
-            return c.to_string();
-        }
-    }
-    "fonts".to_string()
 }
 
 fn parse_color_arg(value: &str) -> Result<Color, String> {

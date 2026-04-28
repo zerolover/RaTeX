@@ -9,7 +9,7 @@ documentation.workspace = true
 description = "Raster and image rendering for RaTeX math typesetting"
 
 [dev-dependencies]
-ratex-svg = { workspace = true, features = ["standalone"] }
+ratex-svg = { workspace = true }
 ratex-pdf = { workspace = true }
 
 [dependencies]

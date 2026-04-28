@@ -1,0 +1,88 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-15
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-15
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install musl tools
+        if: startsWith(matrix.target, 'x86_64-unknown-linux-musl') || startsWith(matrix.target, 'aarch64-unknown-linux-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cargo build --release --target ${{ matrix.target }} -p ratex-render --features embed-fonts
+          cargo build --release --target ${{ matrix.target }} -p ratex-svg --features cli
+          cargo build --release --target ${{ matrix.target }} -p ratex-pdf --features cli
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo build --release --target ${{ matrix.target }} -p ratex-render --features embed-fonts
+          cargo build --release --target ${{ matrix.target }} -p ratex-svg --features cli
+          cargo build --release --target ${{ matrix.target }} -p ratex-pdf --features cli
+
+      - name: Package (Unix)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          mkdir -p ratex-cli-${{ github.ref_name }}-${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/render ratex-cli-${{ github.ref_name }}-${{ matrix.target }}/
+          cp target/${{ matrix.target }}/release/render-svg ratex-cli-${{ github.ref_name }}-${{ matrix.target }}/
+          cp target/${{ matrix.target }}/release/render-pdf ratex-cli-${{ github.ref_name }}-${{ matrix.target }}/
+          tar czf ratex-cli-${{ github.ref_name }}-${{ matrix.target }}.tar.gz ratex-cli-${{ github.ref_name }}-${{ matrix.target }}
+
+      - name: Package (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "ratex-cli-${{ github.ref_name }}-${{ matrix.target }}" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/render.exe" "ratex-cli-${{ github.ref_name }}-${{ matrix.target }}/"
+          Copy-Item "target/${{ matrix.target }}/release/render-svg.exe" "ratex-cli-${{ github.ref_name }}-${{ matrix.target }}/"
+          Copy-Item "target/${{ matrix.target }}/release/render-pdf.exe" "ratex-cli-${{ github.ref_name }}-${{ matrix.target }}/"
+          Compress-Archive -Path "ratex-cli-${{ github.ref_name }}-${{ matrix.target }}" -DestinationPath "ratex-cli-${{ github.ref_name }}-${{ matrix.target }}.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ratex-cli-${{ matrix.target }}
+          path: ratex-cli-${{ github.ref_name }}-${{ matrix.target }}.*

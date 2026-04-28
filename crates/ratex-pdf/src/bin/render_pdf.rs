@@ -11,15 +11,6 @@ use ratex_types::math_style::MathStyle;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    // `cli` implies `embed-fonts`; glyph bytes come from ratex-katex-fonts.
-    // `PdfOptions::font_dir` is ignored for loading but kept for API compatibility.
-    let font_dir = args
-        .iter()
-        .position(|a| a == "--font-dir")
-        .and_then(|i| args.get(i + 1))
-        .cloned()
-        .unwrap_or_else(default_font_dir);
-
     let output_dir = args
         .iter()
         .position(|a| a == "--output-dir")
@@ -40,6 +31,7 @@ fn main() {
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse::<f64>().ok())
         .unwrap_or(40.0);
+    let show_baseline = args.iter().any(|a| a == "--show-baseline");
 
     std::fs::create_dir_all(&output_dir).expect("Failed to create output dir");
 
@@ -48,7 +40,7 @@ fn main() {
         font_size: font_size * dpr,
         padding: 10.0 * dpr,
         stroke_width: 1.5 * dpr,
-        font_dir,
+        show_baseline,
     };
 
     let inline = args.iter().any(|a| a == "--inline");
@@ -98,16 +90,4 @@ fn pdf_formula(
     let lbox = layout(&ast, layout_opts);
     let display_list = to_display_list(&lbox);
     render_to_pdf(&display_list, pdf_opts).map_err(|e| format!("{e}"))
-}
-
-fn default_font_dir() -> String {
-    const MARKER: &str = "KaTeX_Main-Regular.ttf";
-    let candidates = ["fonts", "../fonts", "../../fonts", "../../../fonts"];
-    for c in &candidates {
-        let p = std::path::Path::new(c);
-        if p.join(MARKER).is_file() {
-            return c.to_string();
-        }
-    }
-    "fonts".to_string()
 }
