@@ -147,6 +147,7 @@ pub fn clear_unicode_font_cache() {
     if let Ok(mut cached) = cache().write() {
         cached.retain(|key, _| key.font_id != FontId::CjkRegular);
     }
+    outline_cache::clear_font_caches(FontId::CjkRegular);
 }
 
 pub fn load_fonts_for_items(font_dir: &str, items: &[DisplayItem]) -> Result<FontSet, String> {

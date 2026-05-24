@@ -73,3 +73,10 @@ pub fn get_or_compute_outline(
     cache.insert(key, curves);
     Some(result)
 }
+
+/// Clear cached outline data for a single logical font id.
+pub fn clear_font_caches(font_id: FontId) {
+    if let Ok(mut cache) = OUTLINE_CACHE.write() {
+        cache.retain(|(cached_font_id, _), _| *cached_font_id != font_id);
+    }
+}
