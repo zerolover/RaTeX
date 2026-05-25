@@ -279,7 +279,7 @@ fn emit_line(
         let ycs = fmt_num(yc);
         let x1s = fmt_num(x0 + w);
         let ts = fmt_num(t);
-        let dash = fmt_num(t * 3.0);
+        let dash = fmt_num(t * 4.0);
         let _ = write!(
             out,
             r#"<line x1="{x0s}" y1="{ycs}" x2="{x1s}" y2="{ycs}" stroke="{stroke}" stroke-width="{ts}" stroke-dasharray="{dash} {dash}"/>"#

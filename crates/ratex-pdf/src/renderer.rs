@@ -353,7 +353,7 @@ struct LineParams {
 }
 
 fn emit_line(content: &mut Content, line: &LineParams) {
-    let t = line.thickness.max(0.5);
+    let t = line.thickness.max(0.4);
 
     set_fill_rgb(content, &line.color);
 
@@ -364,7 +364,7 @@ fn emit_line(content: &mut Content, line: &LineParams) {
         let top = line.y - t / 2.0;
         let mut cur_x = line.x;
         while cur_x < line.x + line.width {
-            let seg_w = dash_len.min(line.x + line.width - cur_x).max(0.5);
+            let seg_w = dash_len.min(line.x + line.width - cur_x).max(0.4);
             let pdf_x = cur_x as f32;
             let pdf_y = flip_y(top + t, line.page_h); // bottom edge in PDF coords
             content.rect(pdf_x, pdf_y, seg_w as f32, t as f32);
@@ -393,8 +393,8 @@ fn emit_rect(
     color: &Color,
     page_h: f64,
 ) {
-    let w = width.max(0.5);
-    let h = height.max(0.5);
+    let w = width.max(0.4);
+    let h = height.max(0.4);
 
     set_fill_rgb(content, color);
     let pdf_x = x as f32;
