@@ -140,6 +140,14 @@ pub(crate) fn resolve_pdf_glyph(
     None
 }
 
+pub(crate) fn font_ref_for_id<'a>(
+    font_data: &'a RawFontData,
+    font_id: FontId,
+) -> Option<ab_glyph::FontRef<'a>> {
+    let bytes = font_data.get(&font_id)?;
+    ab_glyph::FontRef::try_from_slice_and_index(bytes, skrifa_collection_index(font_id)).ok()
+}
+
 /// Info about a glyph we want to embed.
 #[derive(Clone, Debug)]
 pub(crate) struct GlyphInfo {

@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use ab_glyph::Font;
 use pdf_writer::{Content, Filter, Finish, Name, Pdf, Rect, Ref, Str};
 use ratex_font::FontId;
 use ratex_types::color::Color;
@@ -64,22 +65,261 @@ const DEFAULT_TEX_TEXT_PT: f64 = 10.0;
 const BASELINE_MARKER_LEN_EM: f64 = (0.1 * PDF_PT_PER_CM) / DEFAULT_TEX_TEXT_PT;
 const BASELINE_MARKER_WIDTH_EM: f64 = 0.1 / DEFAULT_TEX_TEXT_PT;
 
+#[derive(Debug, Clone, Copy)]
+struct Bounds {
+    min_x: f64,
+    min_y: f64,
+    max_x: f64,
+    max_y: f64,
+}
+
+impl Bounds {
+    fn empty() -> Self {
+        Self {
+            min_x: f64::INFINITY,
+            min_y: f64::INFINITY,
+            max_x: f64::NEG_INFINITY,
+            max_y: f64::NEG_INFINITY,
+        }
+    }
+
+    fn from_corners(x0: f64, y0: f64, x1: f64, y1: f64) -> Self {
+        Self {
+            min_x: x0,
+            min_y: y0,
+            max_x: x1,
+            max_y: y1,
+        }
+    }
+
+    fn include_point(&mut self, x: f64, y: f64) {
+        self.min_x = self.min_x.min(x);
+        self.min_y = self.min_y.min(y);
+        self.max_x = self.max_x.max(x);
+        self.max_y = self.max_y.max(y);
+    }
+
+    fn include_bounds(&mut self, bounds: Bounds) {
+        self.include_point(bounds.min_x, bounds.min_y);
+        self.include_point(bounds.max_x, bounds.max_y);
+    }
+
+    fn expand(&mut self, delta: f64) {
+        if self.is_finite() {
+            self.min_x -= delta;
+            self.min_y -= delta;
+            self.max_x += delta;
+            self.max_y += delta;
+        }
+    }
+
+    fn is_finite(&self) -> bool {
+        self.min_x.is_finite()
+    }
+
+    fn with_fallback(self, fallback: Self) -> Self {
+        if self.is_finite() { self } else { fallback }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PageGeometry {
+    page_w: f64,
+    page_h: f64,
+    translate_x: f64,
+    translate_y: f64,
+}
+
+fn path_bounds(origin_x: f64, origin_y: f64, em: f64, commands: &[PathCommand]) -> Bounds {
+    let mut bounds = Bounds::empty();
+    for cmd in commands {
+        match cmd {
+            PathCommand::MoveTo { x, y } | PathCommand::LineTo { x, y } => {
+                bounds.include_point(origin_x + x * em, origin_y + y * em);
+            }
+            PathCommand::QuadTo { x1, y1, x, y } => {
+                bounds.include_point(origin_x + x1 * em, origin_y + y1 * em);
+                bounds.include_point(origin_x + x * em, origin_y + y * em);
+            }
+            PathCommand::CubicTo { x1, y1, x2, y2, x, y } => {
+                bounds.include_point(origin_x + x1 * em, origin_y + y1 * em);
+                bounds.include_point(origin_x + x2 * em, origin_y + y2 * em);
+                bounds.include_point(origin_x + x * em, origin_y + y * em);
+            }
+            PathCommand::Close => {}
+        }
+    }
+    bounds
+}
+
+fn glyph_bounds(
+    font_data: &fonts::RawFontData,
+    font_name: &str,
+    char_code: u32,
+    px: f64,
+    py: f64,
+    glyph_em: f64,
+) -> Option<Bounds> {
+    let (font_id, gid_u16) = fonts::resolve_pdf_glyph(font_data, font_name, char_code)?;
+    let font = fonts::font_ref_for_id(font_data, font_id)?;
+    let glyph_id = ab_glyph::GlyphId(gid_u16);
+    let local_bounds =
+        ratex_font_loader::outline_cache::get_or_compute_local_bounds(font_id, &font, glyph_id)?;
+    let upem = font.units_per_em().unwrap_or(1000.0) as f64;
+    let scale = glyph_em / upem;
+    Some(Bounds::from_corners(
+        px + local_bounds.x_min as f64 * scale,
+        py - local_bounds.y_max as f64 * scale,
+        px + local_bounds.x_max as f64 * scale,
+        py - local_bounds.y_min as f64 * scale,
+    ))
+}
+
+fn item_bounds(
+    item: &DisplayItem,
+    em: f64,
+    pad: f64,
+    stroke_width: f64,
+    font_data: &fonts::RawFontData,
+) -> Option<Bounds> {
+    match item {
+        DisplayItem::GlyphPath {
+            x,
+            y,
+            scale,
+            font,
+            char_code,
+            ..
+        } => glyph_bounds(
+            font_data,
+            font,
+            *char_code,
+            *x * em + pad,
+            *y * em + pad,
+            *scale * em,
+        ),
+        DisplayItem::Line {
+            x,
+            y,
+            width,
+            thickness,
+            ..
+        } => {
+            let lx = *x * em + pad;
+            let ly = *y * em + pad;
+            let t2 = (*thickness * em) / 2.0;
+            Some(Bounds::from_corners(lx, ly - t2, lx + *width * em, ly + t2))
+        }
+        DisplayItem::Rect {
+            x,
+            y,
+            width,
+            height,
+            ..
+        } => {
+            let x0 = *x * em + pad;
+            let y0 = *y * em + pad;
+            Some(Bounds::from_corners(
+                x0,
+                y0,
+                x0 + *width * em,
+                y0 + *height * em,
+            ))
+        }
+        DisplayItem::Path {
+            x,
+            y,
+            commands,
+            fill,
+            ..
+        } => {
+            let mut bounds = path_bounds(*x * em + pad, *y * em + pad, em, commands);
+            if !*fill {
+                bounds.expand(stroke_width / 2.0);
+            }
+            bounds.is_finite().then_some(bounds)
+        }
+    }
+}
+
+fn compute_content_bounds(
+    display_list: &DisplayList,
+    font_data: &fonts::RawFontData,
+    em: f64,
+    pad: f64,
+    stroke_width: f64,
+) -> Bounds {
+    let mut content_bounds = Bounds::empty();
+    for item in &display_list.items {
+        if let Some(bounds) = item_bounds(item, em, pad, stroke_width, font_data) {
+            content_bounds.include_bounds(bounds);
+        }
+    }
+    content_bounds
+}
+
+fn baseline_marker_bounds(anchor_x: f64, baseline_y: f64, em: f64) -> Bounds {
+    let marker_width = em * BASELINE_MARKER_WIDTH_EM;
+    let marker_len = em * BASELINE_MARKER_LEN_EM;
+    let half_marker_width = marker_width / 2.0;
+    Bounds::from_corners(
+        anchor_x,
+        baseline_y - half_marker_width,
+        anchor_x + marker_len,
+        baseline_y + half_marker_width,
+    )
+}
+
+fn compute_page_geometry(
+    display_list: &DisplayList,
+    font_data: &fonts::RawFontData,
+    options: &PdfOptions,
+) -> PageGeometry {
+    let em = options.font_size;
+    let pad = options.padding;
+    let total_h = display_list.height + display_list.depth;
+
+    let fallback = Bounds::from_corners(
+        pad,
+        pad,
+        display_list.width * em + pad,
+        total_h * em + pad,
+    );
+
+    let mut content_bounds =
+        compute_content_bounds(display_list, font_data, em, pad, options.stroke_width);
+    if options.show_baseline {
+        let baseline_y = display_list.height * em + pad;
+        let anchor_x = content_bounds.with_fallback(fallback).min_x;
+        content_bounds.include_bounds(baseline_marker_bounds(anchor_x, baseline_y, em));
+    }
+    let content_bounds = content_bounds.with_fallback(fallback);
+
+    let min_x = content_bounds.min_x - pad;
+    let min_y = content_bounds.min_y - pad;
+    let page_w = (content_bounds.max_x - content_bounds.min_x + 2.0 * pad).max(1.0);
+    let page_h = (content_bounds.max_y - content_bounds.min_y + 2.0 * pad).max(1.0);
+
+    PageGeometry {
+        page_w,
+        page_h,
+        translate_x: -min_x,
+        translate_y: -min_y,
+    }
+}
+
 /// Render a [`DisplayList`] to a PDF byte buffer.
 pub fn render_to_pdf(
     display_list: &DisplayList,
     options: &PdfOptions,
 ) -> Result<Vec<u8>, PdfError> {
     let em = options.font_size;
-    let pad = options.padding;
     let sw = options.stroke_width;
-
-    let total_h = display_list.height + display_list.depth;
-    let page_w = display_list.width * em + 2.0 * pad;
-    let page_h = total_h * em + 2.0 * pad;
 
     // Load raw font data (lazy: only fonts referenced by this display list).
     let font_data =
         ratex_font_loader::load_fonts_for_items("", &display_list.items).map_err(PdfError::Font)?;
+    let page_geom = compute_page_geometry(display_list, &font_data, options);
 
     // Pass 1: collect glyph usage across the display list.
     let font_usages = fonts::collect_glyph_usage(&display_list.items, &font_data);
@@ -111,10 +351,12 @@ pub fn render_to_pdf(
         &font_index,
         &font_data,
         em,
-        pad,
-        page_h,
+        options.padding,
+        page_geom.page_h,
         sw,
         options.show_baseline,
+        page_geom.translate_x,
+        page_geom.translate_y,
     );
 
     // Compress content stream.
@@ -129,7 +371,7 @@ pub fn render_to_pdf(
     // Page object.
     let mut page = pdf.page(page_ref);
     page.parent(pages_ref);
-    page.media_box(Rect::new(0.0, 0.0, page_w as f32, page_h as f32));
+    page.media_box(Rect::new(0.0, 0.0, page_geom.page_w as f32, page_geom.page_h as f32));
     page.contents(content_ref);
 
     // Page Resources: font dictionary.
@@ -169,15 +411,27 @@ fn build_content_stream(
     page_h: f64,
     stroke_width: f64,
     show_baseline: bool,
+    translate_x: f64,
+    translate_y: f64,
 ) -> Vec<u8> {
     let items = &display_list.items;
     let mut content = Content::new();
+    content.save_state();
+    content.transform([1.0, 0.0, 0.0, 1.0, translate_x as f32, -translate_y as f32]);
 
     // Draw a short baseline marker aligned with the formula baseline.
     // The marker scales with the formula font size so the visual proportion matches
     // LaTeX's `\rule{0.1cm}{0.1pt}` at the default 10pt text size.
     if show_baseline {
+        let content_bounds = compute_content_bounds(display_list, font_data, em, pad, stroke_width);
+        let fallback = Bounds::from_corners(
+            pad,
+            pad,
+            display_list.width * em + pad,
+            (display_list.height + display_list.depth) * em + pad,
+        );
         let baseline_y = display_list.height * em + pad;
+        let anchor_x = content_bounds.with_fallback(fallback).min_x;
         let line_y = flip_y(baseline_y, page_h);
         let marker_width = (em * BASELINE_MARKER_WIDTH_EM) as f32;
         let marker_len = em * BASELINE_MARKER_LEN_EM;
@@ -185,8 +439,8 @@ fn build_content_stream(
         content.set_line_width(marker_width);
         content.set_stroke_rgb(0.0, 0.0, 0.0);
 
-        let start_x = pad as f32;
-        let end_x = (pad + marker_len) as f32;
+        let start_x = anchor_x as f32;
+        let end_x = (anchor_x + marker_len) as f32;
 
         content.move_to(start_x, line_y);
         content.line_to(end_x, line_y);
@@ -279,6 +533,7 @@ fn build_content_stream(
         }
     }
 
+    content.restore_state();
     content.finish().into_vec()
 }
 
@@ -567,6 +822,13 @@ mod tests {
     use ratex_font::FontId;
     use ratex_types::display_item::DisplayList;
 
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 1e-9,
+            "expected {expected}, got {actual}"
+        );
+    }
+
     #[test]
     fn show_baseline_draws_short_marker_at_formula_baseline() {
         let display_list = DisplayList {
@@ -587,6 +849,8 @@ mod tests {
             (display_list.height + display_list.depth) * 20.0 + 20.0,
             1.5,
             true,
+            0.0,
+            0.0,
         );
 
         let content = String::from_utf8(content).expect("PDF content stream should be UTF-8");
@@ -606,5 +870,129 @@ mod tests {
             content.contains(&format!("{baseline_x2:.7} {:.0} l", baseline_y)),
             "missing baseline end in content stream: {content}"
         );
+    }
+
+    #[test]
+    fn compute_page_geometry_tightens_to_content_bounds() {
+        let display_list = DisplayList {
+            items: vec![ratex_types::display_item::DisplayItem::Rect {
+                x: 1.0,
+                y: 2.0,
+                width: 0.5,
+                height: 0.25,
+                color: ratex_types::color::Color::BLACK,
+            }],
+            width: 4.0,
+            height: 3.0,
+            depth: 1.0,
+        };
+        let font_data: crate::fonts::RawFontData = HashMap::<FontId, Vec<u8>>::new().into();
+        let options = crate::renderer::PdfOptions {
+            font_size: 20.0,
+            padding: 10.0,
+            stroke_width: 1.5,
+            show_baseline: false,
+        };
+
+        let page = super::compute_page_geometry(&display_list, &font_data, &options);
+
+        assert_eq!(page.page_w, 30.0);
+        assert_eq!(page.page_h, 25.0);
+        assert_eq!(page.translate_x, -20.0);
+        assert_eq!(page.translate_y, -40.0);
+    }
+
+    #[test]
+    fn compute_page_geometry_includes_baseline_marker_bounds() {
+        let display_list = DisplayList {
+            items: vec![],
+            width: 0.0,
+            height: 2.5,
+            depth: 1.0,
+        };
+        let font_data: crate::fonts::RawFontData = HashMap::<FontId, Vec<u8>>::new().into();
+        let options = crate::renderer::PdfOptions {
+            font_size: 20.0,
+            padding: 10.0,
+            stroke_width: 1.5,
+            show_baseline: true,
+        };
+
+        let page = super::compute_page_geometry(&display_list, &font_data, &options);
+        let expected_marker_width = 20.0 * BASELINE_MARKER_WIDTH_EM;
+        let expected_marker_len = 20.0 * BASELINE_MARKER_LEN_EM;
+
+        assert_close(page.page_w, expected_marker_len + 20.0);
+        assert_close(page.page_h, expected_marker_width + 20.0);
+        assert_close(page.translate_x, 0.0);
+        assert_close(page.translate_y, -(50.0 - expected_marker_width / 2.0));
+    }
+
+    #[test]
+    fn compute_page_geometry_keeps_tight_horizontal_crop_with_baseline() {
+        let display_list = DisplayList {
+            items: vec![ratex_types::display_item::DisplayItem::Rect {
+                x: 1.0,
+                y: 2.0,
+                width: 0.5,
+                height: 0.25,
+                color: ratex_types::color::Color::BLACK,
+            }],
+            width: 4.0,
+            height: 3.0,
+            depth: 1.0,
+        };
+        let font_data: crate::fonts::RawFontData = HashMap::<FontId, Vec<u8>>::new().into();
+        let options = crate::renderer::PdfOptions {
+            font_size: 20.0,
+            padding: 10.0,
+            stroke_width: 1.5,
+            show_baseline: true,
+        };
+
+        let page = super::compute_page_geometry(&display_list, &font_data, &options);
+
+        assert_close(page.page_w, 30.0);
+        assert_close(page.translate_x, -20.0);
+    }
+
+    #[test]
+    fn content_stream_wraps_items_in_page_translation() {
+        let display_list = DisplayList {
+            items: vec![ratex_types::display_item::DisplayItem::Rect {
+                x: 1.0,
+                y: 2.0,
+                width: 0.5,
+                height: 0.25,
+                color: ratex_types::color::Color::BLACK,
+            }],
+            width: 4.0,
+            height: 3.0,
+            depth: 1.0,
+        };
+        let font_data: crate::fonts::RawFontData = HashMap::<FontId, Vec<u8>>::new().into();
+
+        let content = build_content_stream(
+            &display_list,
+            &[],
+            &HashMap::new(),
+            &font_data,
+            20.0,
+            10.0,
+            25.0,
+            1.5,
+            false,
+            -20.0,
+            -40.0,
+        );
+
+        let content = String::from_utf8(content).expect("PDF content stream should be UTF-8");
+        assert!(content.contains("q"));
+        assert!(content.contains("1 0 0 1 -20 40 cm"));
+        assert!(
+            content.contains(" re"),
+            "missing rect op in content stream: {content}"
+        );
+        assert!(content.contains("Q"));
     }
 }

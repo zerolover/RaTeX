@@ -26,10 +26,21 @@ pub(crate) fn build_font_refs<'a>(
     Ok(font_refs)
 }
 
-/// Vector path output matching `ratex-render::render_glyph` geometry.
+/// Viewport-space bounding box of a glyph outline.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GlyphBounds {
+    pub x_min: f32,
+    pub y_min: f32,
+    pub x_max: f32,
+    pub y_max: f32,
+}
+
+/// Vector path output matching `ratex-render::render_glyph` geometry,
+/// together with its viewport-space bounding box (from font glyph_bounds).
 #[derive(Debug)]
-pub(crate) enum GlyphAsset {
-    Path(String),
+pub(crate) struct GlyphAsset {
+    pub path: String,
+    pub bounds: Option<GlyphBounds>,
 }
 
 /// Same geometry as `ratex-render`: SVG user space, y downward.
@@ -55,14 +66,14 @@ pub(crate) fn outline_glyph(
     }
 
     if font_id == FontId::CjkRegular {
-        if let Some(d) = outline_to_d(px, py, glyph_em, FontId::CjkRegular, font, glyph_id) {
-            return Some(GlyphAsset::Path(d));
+        if let Some((d, bounds)) = outline_to_d(px, py, glyph_em, FontId::CjkRegular, font, glyph_id) {
+            return Some(GlyphAsset { path: d, bounds });
         }
         return None;
     }
 
-    if let Some(d) = outline_to_d(px, py, glyph_em, font_id, font, glyph_id) {
-        return Some(GlyphAsset::Path(d));
+    if let Some((d, bounds)) = outline_to_d(px, py, glyph_em, font_id, font, glyph_id) {
+        return Some(GlyphAsset { path: d, bounds });
     }
 
     let skip_main = font_id == FontId::MainRegular;
@@ -81,8 +92,8 @@ fn try_system_unicode_fallback_svg(
         if let Some(fallback) = font_cache.get(&FontId::MainRegular) {
             let fid = fallback.glyph_id(ch);
             if fid.0 != 0 {
-                if let Some(d) = outline_to_d(px, py, em, FontId::MainRegular, fallback, fid) {
-                    return Some(GlyphAsset::Path(d));
+                if let Some((d, bounds)) = outline_to_d(px, py, em, FontId::MainRegular, fallback, fid) {
+                    return Some(GlyphAsset { path: d, bounds });
                 }
             }
         }
@@ -90,8 +101,8 @@ fn try_system_unicode_fallback_svg(
     if let Some(cjk) = font_cache.get(&FontId::CjkRegular) {
         let cid = cjk.glyph_id(ch);
         if cid.0 != 0 {
-            if let Some(d) = outline_to_d(px, py, em, FontId::CjkRegular, cjk, cid) {
-                return Some(GlyphAsset::Path(d));
+            if let Some((d, bounds)) = outline_to_d(px, py, em, FontId::CjkRegular, cjk, cid) {
+                return Some(GlyphAsset { path: d, bounds });
             }
         }
     }
@@ -105,12 +116,14 @@ fn outline_to_d(
     font_id: FontId,
     font: &FontRef<'_>,
     glyph_id: ab_glyph::GlyphId,
-) -> Option<String> {
+) -> Option<(String, Option<GlyphBounds>)> {
     let curves = ratex_font_loader::outline_cache::get_or_compute_outline(
         font_id, font, glyph_id,
     )?;
     let units_per_em = font.units_per_em().unwrap_or(1000.0);
     let scale = em / units_per_em;
+    let local_bounds =
+        ratex_font_loader::outline_cache::get_or_compute_local_bounds(font_id, font, glyph_id);
 
     let mut d = String::new();
     let mut last_end: Option<(f32, f32)> = None;
@@ -210,6 +223,12 @@ fn outline_to_d(
     if d.is_empty() {
         None
     } else {
-        Some(d)
+        let bounds = local_bounds.map(|bounds| GlyphBounds {
+            x_min: px + bounds.x_min * scale,
+            y_min: py - bounds.y_max * scale,
+            x_max: px + bounds.x_max * scale,
+            y_max: py - bounds.y_min * scale,
+        });
+        Some((d, bounds))
     }
 }

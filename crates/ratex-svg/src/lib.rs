@@ -40,6 +40,159 @@ impl SvgOptions {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct Bounds {
+    min_x: f64,
+    min_y: f64,
+    max_x: f64,
+    max_y: f64,
+}
+
+impl Bounds {
+    fn empty() -> Self {
+        Self {
+            min_x: f64::INFINITY,
+            min_y: f64::INFINITY,
+            max_x: f64::NEG_INFINITY,
+            max_y: f64::NEG_INFINITY,
+        }
+    }
+
+    fn from_corners(x0: f64, y0: f64, x1: f64, y1: f64) -> Self {
+        Self {
+            min_x: x0,
+            min_y: y0,
+            max_x: x1,
+            max_y: y1,
+        }
+    }
+
+    fn from_glyph_bounds(bounds: &glyphs::GlyphBounds) -> Self {
+        Self::from_corners(
+            bounds.x_min as f64,
+            bounds.y_min as f64,
+            bounds.x_max as f64,
+            bounds.y_max as f64,
+        )
+    }
+
+    fn include_point(&mut self, x: f64, y: f64) {
+        self.min_x = self.min_x.min(x);
+        self.min_y = self.min_y.min(y);
+        self.max_x = self.max_x.max(x);
+        self.max_y = self.max_y.max(y);
+    }
+
+    fn include_corners(&mut self, x0: f64, y0: f64, x1: f64, y1: f64) {
+        self.include_point(x0, y0);
+        self.include_point(x1, y1);
+    }
+
+    fn include_bounds(&mut self, bounds: Bounds) {
+        self.include_corners(bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y);
+    }
+
+    fn expand(&mut self, delta: f64) {
+        if self.is_finite() {
+            self.min_x -= delta;
+            self.min_y -= delta;
+            self.max_x += delta;
+            self.max_y += delta;
+        }
+    }
+
+    fn is_finite(&self) -> bool {
+        self.min_x.is_finite()
+    }
+
+    fn with_fallback(self, fallback: Self) -> Self {
+        if self.is_finite() { self } else { fallback }
+    }
+}
+
+fn path_bounds(origin_x: f64, origin_y: f64, em: f64, commands: &[PathCommand]) -> Bounds {
+    let mut bounds = Bounds::empty();
+    for cmd in commands {
+        match cmd {
+            PathCommand::MoveTo { x, y } | PathCommand::LineTo { x, y } => {
+                bounds.include_point(origin_x + x * em, origin_y + y * em);
+            }
+            PathCommand::QuadTo { x1, y1, x, y } => {
+                bounds.include_point(origin_x + x1 * em, origin_y + y1 * em);
+                bounds.include_point(origin_x + x * em, origin_y + y * em);
+            }
+            PathCommand::CubicTo { x1, y1, x2, y2, x, y } => {
+                bounds.include_point(origin_x + x1 * em, origin_y + y1 * em);
+                bounds.include_point(origin_x + x2 * em, origin_y + y2 * em);
+                bounds.include_point(origin_x + x * em, origin_y + y * em);
+            }
+            PathCommand::Close => {}
+        }
+    }
+    bounds
+}
+
+fn item_bounds(
+    item: &DisplayItem,
+    item_idx: usize,
+    prerendered_glyphs: Option<&[Option<glyphs::GlyphAsset>]>,
+    opts: &SvgOptions,
+) -> Option<Bounds> {
+    let em = opts.em_px();
+    let pad = opts.padding;
+
+    match item {
+        DisplayItem::GlyphPath { .. } => prerendered_glyphs
+            .and_then(|glyphs| glyphs.get(item_idx))
+            .and_then(|glyph| glyph.as_ref())
+            .and_then(|glyph| glyph.bounds.as_ref())
+            .map(Bounds::from_glyph_bounds),
+        DisplayItem::Line {
+            x,
+            y,
+            width,
+            thickness,
+            ..
+        } => {
+            let lx = *x * em + pad;
+            let ly = *y * em + pad;
+            let t2 = (*thickness * em) / 2.0;
+            Some(Bounds::from_corners(lx, ly - t2, lx + *width * em, ly + t2))
+        }
+        DisplayItem::Rect {
+            x,
+            y,
+            width,
+            height,
+            ..
+        } => {
+            let x0 = *x * em + pad;
+            let y0 = *y * em + pad;
+            Some(Bounds::from_corners(
+                x0,
+                y0,
+                x0 + *width * em,
+                y0 + *height * em,
+            ))
+        }
+        DisplayItem::Path {
+            x,
+            y,
+            commands,
+            fill,
+            ..
+        } => {
+            let ox = *x * em + pad;
+            let oy = *y * em + pad;
+            let mut bounds = path_bounds(ox, oy, em, commands);
+            if !*fill {
+                bounds.expand(opts.stroke_width / 2.0);
+            }
+            bounds.is_finite().then_some(bounds)
+        }
+    }
+}
+
 /// Render a display list to an SVG document string.
 pub fn render_to_svg(list: &DisplayList, opts: &SvgOptions) -> String {
     // Pre-render glyph outlines while holding the font lock, then drop it.
@@ -81,11 +234,30 @@ pub fn render_to_svg(list: &DisplayList, opts: &SvgOptions) -> String {
     let em = opts.em_px();
     let pad = opts.padding;
     let total_h = list.height + list.depth;
-    let vb_w = list.width * em + 2.0 * pad;
-    let vb_h = total_h * em + 2.0 * pad;
+    let fallback_bounds = Bounds::from_corners(
+        pad,
+        pad,
+        list.width * em + pad,
+        total_h * em + pad,
+    );
+    let has_glyph_text_fallback = list.items.iter().enumerate().any(|(item_idx, item)| {
+        matches!(item, DisplayItem::GlyphPath { .. })
+            && prerendered_glyphs
+                .as_ref()
+                .and_then(|glyphs| glyphs.get(item_idx))
+                .and_then(|glyph| glyph.as_ref())
+                .is_none()
+    });
+
+    // Compute content bounds while generating SVG body.
+    let mut content_bounds = Bounds::empty();
 
     let mut body = String::new();
     for (item_idx, item) in list.items.iter().enumerate() {
+        if let Some(bounds) = item_bounds(item, item_idx, prerendered_glyphs.as_deref(), opts) {
+            content_bounds.include_bounds(bounds);
+        }
+
         match item {
             DisplayItem::GlyphPath {
                 x,
@@ -133,14 +305,29 @@ pub fn render_to_svg(list: &DisplayList, opts: &SvgOptions) -> String {
         }
     }
 
-    wrap_svg(vb_w, vb_h, &body)
+    // Fall back to layout box when no content bounds (e.g. empty list), or
+    // when any glyph was emitted as `<text>` rather than a prerendered outline.
+    let content_bounds = if has_glyph_text_fallback {
+        fallback_bounds
+    } else {
+        content_bounds.with_fallback(fallback_bounds)
+    };
+
+    let vb_x = content_bounds.min_x - pad;
+    let vb_y = content_bounds.min_y - pad;
+    let vb_w = (content_bounds.max_x - content_bounds.min_x + 2.0 * pad).max(1.0);
+    let vb_h = (content_bounds.max_y - content_bounds.min_y + 2.0 * pad).max(1.0);
+
+    wrap_svg(vb_x, vb_y, vb_w, vb_h, &body)
 }
 
-fn wrap_svg(vb_w: f64, vb_h: f64, body: &str) -> String {
+fn wrap_svg(vb_x: f64, vb_y: f64, vb_w: f64, vb_h: f64, body: &str) -> String {
+    let x = fmt_num(vb_x);
+    let y = fmt_num(vb_y);
     let w = fmt_num(vb_w);
     let h = fmt_num(vb_h);
     format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}pt" height="{h}pt">{body}</svg>"#
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="{x} {y} {w} {h}" width="{w}pt" height="{h}pt">{body}</svg>"#
     )
 }
 
@@ -164,7 +351,7 @@ pub(crate) fn fmt_num(n: f64) -> String {
     let s = format!("{n:.6}");
     let s = s.trim_end_matches('0');
     let s = s.trim_end_matches('.');
-    if s.is_empty() || s == "-" {
+    if s.is_empty() || s == "-" || s == "-0" {
         "0".to_string()
     } else {
         s.to_string()
@@ -228,7 +415,7 @@ fn emit_glyph_outline(
     prerendered: Option<&glyphs::GlyphAsset>,
 ) {
     if let Some(glyph) = prerendered {
-        let glyphs::GlyphAsset::Path(d) = glyph;
+        let d = &glyph.path;
         let fill = color_to_svg(g.color);
         use std::fmt::Write;
         let _ = write!(
@@ -539,4 +726,5 @@ mod tests {
         assert!(svg.contains("fill-rule=\"nonzero\""));
         assert!(!svg.contains("<text"));
     }
+
 }
