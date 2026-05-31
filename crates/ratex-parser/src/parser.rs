@@ -900,14 +900,16 @@ impl<'a> Parser<'a> {
 
         if let Some(stripped) = text.strip_prefix("\\verb") {
             self.consume();
-            let arg = stripped.to_string();
-            let star = arg.starts_with('*');
-            let arg = if star { &arg[1..] } else { &arg };
-
-            if arg.len() < 2 {
+            let (star, rest) = if let Some(r) = stripped.strip_prefix('*') {
+                (true, r)
+            } else {
+                (false, stripped)
+            };
+            let chars: Vec<char> = rest.chars().collect();
+            if chars.len() < 2 {
                 return Err(ParseError::new("\\verb assertion failed", Some(&nucleus)));
             }
-            let body = arg[1..arg.len() - 1].to_string();
+            let body: String = chars[1..chars.len() - 1].iter().collect();
             return Ok(Some(ParseNode::Verb {
                 mode: Mode::Text,
                 body,

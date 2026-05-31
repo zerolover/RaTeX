@@ -962,3 +962,59 @@ mod environments {
         }
     }
 }
+
+#[cfg(test)]
+mod verb {
+    use crate::parser::parse;
+    use crate::parse_node::ParseNode;
+
+    #[test]
+    fn ascii_delimiter() {
+        let ast = parse("\\verb|hello|").unwrap();
+        assert_eq!(ast.len(), 1);
+        if let ParseNode::Verb { body, star, .. } = &ast[0] {
+            assert_eq!(body, "hello");
+            assert!(!star);
+        } else {
+            panic!("Expected Verb node");
+        }
+    }
+
+    #[test]
+    fn starred_ascii_delimiter() {
+        let ast = parse("\\verb*|hello world|").unwrap();
+        if let ParseNode::Verb { body, star, .. } = &ast[0] {
+            assert_eq!(body, "hello world");
+            assert!(star);
+        } else {
+            panic!("Expected Verb node");
+        }
+    }
+
+    #[test]
+    fn multibyte_delimiter_does_not_panic() {
+        let ast = parse("\\verbéxé").unwrap();
+        if let ParseNode::Verb { body, star, .. } = &ast[0] {
+            assert_eq!(body, "x");
+            assert!(!star);
+        } else {
+            panic!("Expected Verb node");
+        }
+    }
+
+    #[test]
+    fn starred_multibyte_delimiter_does_not_panic() {
+        let ast = parse("\\verb*éxé").unwrap();
+        if let ParseNode::Verb { body, star, .. } = &ast[0] {
+            assert_eq!(body, "x");
+            assert!(star);
+        } else {
+            panic!("Expected Verb node");
+        }
+    }
+
+    #[test]
+    fn too_short_returns_error() {
+        assert!(parse("\\verbé").is_err());
+    }
+}
