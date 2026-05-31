@@ -9,6 +9,8 @@ use crate::parse_node::{AtomFamily, Mode, ParseNode};
 /// End-of-expression tokens.
 static END_OF_EXPRESSION: &[&str] = &["}", "\\endgroup", "\\end", "\\right", "&"];
 
+const MAX_RECURSION_DEPTH: usize = 512;
+
 /// The LaTeX parser. Converts a token stream into a ParseNode AST.
 ///
 /// Follows KaTeX's Parser.ts closely:
@@ -22,6 +24,7 @@ pub struct Parser<'a> {
     pub mode: Mode,
     pub gullet: MacroExpander<'a>,
     pub leftright_depth: i32,
+    recursion_depth: usize,
     next_token: Option<Token>,
     pub equation_counter: usize,
 }
@@ -32,6 +35,7 @@ impl<'a> Parser<'a> {
             mode: Mode::Math,
             gullet: MacroExpander::new(input, Mode::Math),
             leftright_depth: 0,
+            recursion_depth: 0,
             next_token: None,
             equation_counter: 0,
         }
@@ -111,6 +115,21 @@ impl<'a> Parser<'a> {
 
     /// Parse an expression: a list of atoms.
     pub fn parse_expression(
+        &mut self,
+        break_on_infix: bool,
+        break_on_token_text: Option<&str>,
+    ) -> ParseResult<Vec<ParseNode>> {
+        self.recursion_depth += 1;
+        if self.recursion_depth > MAX_RECURSION_DEPTH {
+            self.recursion_depth -= 1;
+            return Err(ParseError::recursion_limit_exceeded());
+        }
+        let result = self.parse_expression_impl(break_on_infix, break_on_token_text);
+        self.recursion_depth -= 1;
+        result
+    }
+
+    fn parse_expression_impl(
         &mut self,
         break_on_infix: bool,
         break_on_token_text: Option<&str>,

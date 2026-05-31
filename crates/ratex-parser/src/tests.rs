@@ -1018,3 +1018,52 @@ mod verb {
         assert!(parse("\\verbé").is_err());
     }
 }
+
+
+
+
+
+#[cfg(test)]
+mod recursion_limit {
+    use crate::error::ParseError;
+    use crate::parser::parse;
+
+    fn nested_braces(n: usize) -> String {
+        format!("{}{}{}", "{".repeat(n), "x", "}".repeat(n))
+    }
+
+    fn assert_recursion_limit_err(input: &str) {
+        let err = parse(input).unwrap_err();
+        assert!(
+            err.to_string().contains("Recursion limit exceeded"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn recursion_limit_error_message() {
+        let err = ParseError::recursion_limit_exceeded();
+        assert!(err.to_string().contains("Recursion limit exceeded"));
+    }
+
+    // Needs release-sized stacks; debug overflows before MAX (512) is reached.
+    #[cfg(not(debug_assertions))]
+    mod release_only {
+        use super::*;
+
+        #[test]
+        fn nested_braces_at_limit_succeeds() {
+            assert!(parse(&nested_braces(511)).is_ok());
+        }
+
+        #[test]
+        fn nested_braces_over_limit_fails() {
+            assert_recursion_limit_err(&nested_braces(512));
+        }
+
+        #[test]
+        fn poc_deep_nesting_does_not_abort() {
+            assert_recursion_limit_err(&nested_braces(200_000));
+        }
+    }
+}
