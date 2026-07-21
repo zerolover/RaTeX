@@ -87,6 +87,15 @@ mod tests {
     }
 
     #[test]
+    fn ce_unicode_non_breaking_space_matches_ascii_space() {
+        let ascii = chem_parse_str("H2O + CO2", "ce").expect("mhchem with ASCII spaces");
+        let non_breaking =
+            chem_parse_str("H2O\u{00A0}+\u{00A0}CO2", "ce").expect("mhchem with non-breaking spaces");
+
+        assert_eq!(non_breaking, ascii);
+    }
+
+    #[test]
     fn pu_simple() {
         let t = chem_parse_str("123 kJ/mol", "pu").expect("mhchem");
         assert!(!t.is_empty());

@@ -19,7 +19,10 @@ ratex-lexer = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-fancy-regex = "0.14"
-regex = "1.11"
+# fancy-regex/regex's default "unicode" feature pulls in unicode-case/gencat/script/age/segment
+# tables that mhchem's patterns never need (no \p{...}, no (?i), no \b). Only \s/\d/\w
+# shorthand classes are used, which need just unicode-perl.
+fancy-regex = { version = "0.14", default-features = false, features = ["std", "perf"] }
+regex = { version = "1.11", default-features = false, features = ["std", "perf", "unicode-perl"] }
 regex-lite = "0.1"
 unicode-normalization = "0.1.25"
